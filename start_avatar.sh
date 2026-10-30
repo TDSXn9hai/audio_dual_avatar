@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# One-click launcher for the full-duplex digital human:
+#   MuseTalk streaming server (lip-sync video, :8000)
+#   MiniCPM-o demo: backend :22500, worker :22400, gateway + web UI :8006
+# Both run on GPU 0 with the shared venv at ./.venv (torch 2.8 + cu128).
+#
+# Usage: ./start_avatar.sh [start|stop|status]
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${AVATAR_VENV:-${ROOT}/.venv}"
+PYTHON="${VENV_DIR}/bin/python"
+MINICPM_DIR="${ROOT}/minicpm_demo"
+MUSETALK_PROJECT="${ROOT}/musetalk_project"
+MUSETALK_DIR="${MUSETALK_PROJECT}/MuseTalk"
+MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/streaming_duplex.yaml}"
+MUSETALK_PORT=8000
+GATEWAY_PORT="${DEMO_PORT:-8006}"
+RUN_DIR="${ROOT}/.run"
+LOG_DIR="${RUN_DIR}/logs"
+PID_DIR="${RUN_DIR}/pids"
+MUSETALK_PID="${PID_DIR}/musetalk.pid"
+
+mkdir -p "${LOG_DIR}" "${PID_DIR}"
+
+is_running() {
+    local pid_file="$1"
+    [[ -s "${pid_file}" ]] && kill -0 "$(cat "${pid_file}")" 2>/dev/null
+}
+
+wait_musetalk() {
+    local attempts="${1:-150}"
+    for ((i = 1; i <= attempts; i++)); do
+        if ! is_running "${MUSETALK_PID}"; then
+            echo "MuseTalk exited during startup, see ${LOG_DIR}/musetalk.log" >&2
+            return 1
+        fi
+        if curl -sf "http://127.0.0.1:${MUSETALK_PORT}/api/status" 2>/dev/null \
+            | grep -q '"ready":true'; then
+            echo "MuseTalk ready: http://127.0.0.1:${MUSETALK_PORT}/"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "MuseTalk did not become ready, see ${LOG_DIR}/musetalk.log" >&2
+    return 1
+}
+
+start_musetalk() {
+    if is_running "${MUSETALK_PID}"; then
+        echo "MuseTalk is already running (pid $(cat "${MUSETALK_PID}"))."
+        return 0
+    fi
+    rm -f "${MUSETALK_PID}"
+    # Same environment as musetalk_project/activate.sh, but with the shared venv.
+    setsid -f env \
+        VIRTUAL_ENV="${VENV_DIR}" \
+        PATH="${VENV_DIR}/bin:${MUSETALK_DIR}/ffmpeg-4.4-amd64-static:${PATH}" \
+        XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
+        HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \
+        TORCH_HOME="${MUSETALK_PROJECT}/.cache/torch" \
+        MPLCONFIGDIR="${MUSETALK_PROJECT}/.cache/matplotlib" \
+        FFMPEG_PATH="${MUSETALK_DIR}/ffmpeg-4.4-amd64-static" \
+        PYTHONUNBUFFERED=1 \
+        bash -c 'echo "$$" > "$1"; cd "$2"; shift 2; exec "$@"' \
+        _ "${MUSETALK_PID}" "${MUSETALK_DIR}" \
+        "${PYTHON}" stream_server.py --config "${MUSETALK_CONFIG}" \
+        >"${LOG_DIR}/musetalk.log" 2>&1
+    for _ in $(seq 1 50); do
+        [[ -s "${MUSETALK_PID}" ]] && break
+        sleep 0.1
+    done
+    echo "Started MuseTalk: pid $(cat "${MUSETALK_PID}") config=${MUSETALK_CONFIG}"
+    wait_musetalk
+}
+
+start_minicpm() {
+    # The gateway forwards duplex output audio to MuseTalk over this socket,
+    # and proxies MuseTalk's viewer endpoints for the /avatar page.
+    AVATAR_BRIDGE_URL="${AVATAR_BRIDGE_URL-ws://127.0.0.1:${MUSETALK_PORT}/ws/minicpm}" \
+    AVATAR_HTTP_URL="${AVATAR_HTTP_URL-http://127.0.0.1:${MUSETALK_PORT}}" \
+    DEMO_VENV="${VENV_DIR}" DEMO_PORT="${GATEWAY_PORT}" "${MINICPM_DIR}/start_all.sh"
+}
+
+stop_all() {
+    "${MINICPM_DIR}/stop_all.sh" || true
+    if is_running "${MUSETALK_PID}"; then
+        local pid
+        pid="$(cat "${MUSETALK_PID}")"
+        kill "${pid}"
+        # Wait for the port to be released before a restart can bind it.
+        for _ in $(seq 1 30); do
+            kill -0 "${pid}" 2>/dev/null || break
+            sleep 1
+        done
+        kill -0 "${pid}" 2>/dev/null && kill -9 "${pid}"
+        echo "Stopped MuseTalk: pid ${pid}"
+    fi
+    rm -f "${MUSETALK_PID}"
+}
+
+show_status() {
+    if is_running "${MUSETALK_PID}"; then
+        echo "MuseTalk: running (pid $(cat "${MUSETALK_PID}"))"
+    else
+        echo "MuseTalk: stopped"
+    fi
+    for name in gateway backend worker; do
+        if is_running "${MINICPM_DIR}/tmp/pids/${name}.pid"; then
+            echo "MiniCPM ${name}: running (pid $(cat "${MINICPM_DIR}/tmp/pids/${name}.pid"))"
+        else
+            echo "MiniCPM ${name}: stopped"
+        fi
+    done
+}
+
+case "${1:-start}" in
+    start)
+        if [[ ! -x "${PYTHON}" ]]; then
+            echo "Missing shared venv: ${PYTHON}" >&2
+            exit 1
+        fi
+        start_musetalk
+        start_minicpm
+        echo
+        echo "Digital human services started"
+        echo "  Digital human page:        https://127.0.0.1:${GATEWAY_PORT}/avatar"
+        echo "  MiniCPM-o only (no avatar): https://127.0.0.1:${GATEWAY_PORT}/omni"
+        echo "  MuseTalk debug viewer:     http://127.0.0.1:${MUSETALK_PORT}/  (one viewer at a time)"
+        echo "  Avatar bridge:             gateway -> ws://127.0.0.1:${MUSETALK_PORT}/ws/minicpm"
+        echo "  MuseTalk log:              ${LOG_DIR}/musetalk.log"
+        echo "  MiniCPM-o logs:            ${MINICPM_DIR}/.run-logs"
+        echo "  Stop:                      $0 stop"
+        ;;
+    stop)
+        stop_all
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 [start|stop|status]" >&2
+        exit 2
+        ;;
+esac

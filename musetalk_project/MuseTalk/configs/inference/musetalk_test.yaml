@@ -1,0 +1,4 @@
+musetalk_test:
+  video_path: "data/video/musetalk_test_video.mp4"
+  audio_path: "data/audio/musetalk_test_audio.wav"
+  result_name: "musetalk_test_result_v15.mp4"

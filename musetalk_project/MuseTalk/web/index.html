@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MuseTalk 数字人直播</title>
+  <link rel="stylesheet" href="/static/style.css?v=20261023-stream2">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">MT</span>
+        <div>
+          <h1>MuseTalk 数字人直播</h1>
+          <p>支持 WebSocket PCM 流式输入 · 接收到语音后立即开播 · 连续衔接</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="status-pill" id="statusPill">
+          <span class="status-dot"></span>
+          <span id="statusText">启动中</span>
+        </div>
+        <button class="primary" id="reloadBtn" hidden>刷新页面</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage-card">
+        <div class="stage" id="stage">
+          <canvas id="view" width="480" height="864"></canvas>
+          <div class="live-badge" id="liveBadge" hidden><span></span>LIVE</div>
+          <div class="interrupt-banner" id="interruptBanner" hidden>
+            <strong>已打断</strong>
+            <span id="interruptText">等待回答…</span>
+          </div>
+          <div class="overlay" id="overlay">
+            <div class="spinner" id="spinner"></div>
+            <h2 id="overlayTitle">等待后端</h2>
+            <p id="overlayText">正在加载模型和数字人缓存…</p>
+            <button class="primary" id="enterBtn" hidden>进入直播</button>
+          </div>
+        </div>
+
+        <div class="transport">
+          <div class="now-playing">
+            <span class="label">当前语音段</span>
+            <strong id="currentSegment">等待音频</strong>
+          </div>
+          <div class="timeline">
+            <div class="timeline-track"><div class="timeline-fill" id="progressFill"></div></div>
+            <div class="timeline-meta">
+              <span id="currentTime">00:00</span>
+              <span id="segmentDuration">00:00</span>
+            </div>
+          </div>
+          <button class="danger-btn" id="interruptBtn" disabled>打断</button>
+          <button class="icon-btn" id="muteBtn" title="静音" disabled>🔊</button>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-block">
+          <div class="label">直播状态</div>
+          <div class="metric-grid">
+            <div class="metric"><span class="metric-value" id="receivedSegments">0</span><span class="metric-name">已收到语音段</span></div>
+            <div class="metric"><span class="metric-value" id="queuedSegments">0</span><span class="metric-name">后端排队</span></div>
+            <div class="metric"><span class="metric-value" id="bufferedSegments">0</span><span class="metric-name">前端待播</span></div>
+            <div class="metric"><span class="metric-value" id="lastAudioAge">—</span><span class="metric-name">最后音频</span></div>
+          </div>
+          <div class="hint" id="hint">等待服务就绪后点击“进入直播”。</div>
+        </div>
+
+        <div class="panel-block">
+          <div class="label">音频目录</div>
+          <code class="path" id="audioDir">data/audio/</code>
+          <div class="clip-meta" id="idleInfo">30 秒无新音频且播放空闲后，程序会自动退出。</div>
+        </div>
+
+        <div class="panel-block about">
+          <div class="label">连续播放方式</div>
+          <p>流式模式接收 16 kHz 单声道 PCM，并按当前推理 batch 聚合为音频窗口。视频帧 PTS 由音频采样窗口生成，说话帧、静音原帧和服务端待机帧共用同一条时间线。静音帧跳过 UNet；待机画面不再由浏览器循环视频。</p>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js?v=20261023-stream2"></script>
+</body>
+</html>

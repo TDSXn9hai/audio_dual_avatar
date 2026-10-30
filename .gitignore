@@ -1,0 +1,25 @@
+# Model weights (downloaded by install.sh, checked by weights.sha256)
+minicpm_demo/model/
+musetalk_project/MuseTalk/models/
+musetalk_project/MuseTalk/musetalk/utils/face_detection/detection/sfd/s3fd.pth
+*.safetensors
+
+# Environments and caches
+.venv/
+minicpm_demo/.venv/
+musetalk_project/venv/
+.cache/
+musetalk_project/.cache/
+__pycache__/
+*.pyc
+
+# Generated at install / run time
+minicpm_demo/.bin/
+musetalk_project/MuseTalk/ffmpeg-4.4-amd64-static/ffmpeg
+minicpm_demo/certs/
+.run/
+minicpm_demo/.run-logs/
+minicpm_demo/tmp/
+minicpm_demo/data/sessions/
+musetalk_project/MuseTalk/results/live_audio/
+dist/

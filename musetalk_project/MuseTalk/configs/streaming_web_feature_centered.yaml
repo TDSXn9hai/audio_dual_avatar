@@ -1,0 +1,66 @@
+# MuseTalk streaming web preview.
+# All runtime parameters live here; start_streaming.sh needs no arguments.
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  gpu_id: 0
+  fps: 24
+  batch_size: 24
+  prebuffer: 8           # frames buffered before a segment can start (~0.33s)
+  queue_size: 48         # bounded network queue, about 2s at 24fps
+  jpeg_quality: 88
+
+models:
+  version: v15
+  vae_type: sd-vae
+  whisper_dir: ./models/whisper
+  unet_model_path: ./models/musetalkV15/unet.pth
+  unet_config: ./models/musetalkV15/musetalk.json
+
+avatar:
+  id: musetalk_test_avatar
+  video_path: data/video/musetalk_test_video.mp4
+  bbox_shift: 0          # used by v1; v1.5 fixes it to 0
+  preparation: auto      # auto: reuse valid cache or build it; reuse: require cache
+  extra_margin: 10
+  parsing_mode: jaw
+  left_cheek_width: 90
+  right_cheek_width: 90
+
+inference:
+  audio_padding_length_left: 2
+  audio_padding_length_right: 2
+  feature_window_mode: centered  # LiveTalking-style centered window
+  feature_window_left: 4        # centered only: left feature offset
+  feature_window_right: 6       # centered only: right end offset (exclusive)
+  enable_vad: false
+  silence_threshold_dbfs: -45
+  silence_merge_gap_frames: 3
+
+live:
+  input_mode: stream          # file / stream / hybrid
+  audio_dir: data/audio
+  idle_timeout_seconds: 30      # exit only after no new audio AND no queued/generating work
+  interrupt_wait_seconds: 10    # new audio cancels resume; otherwise restore queue after wait
+  interrupt_resume_mode: restart  # restart interrupted segment, or continue from cut point
+  poll_interval_seconds: 0.5
+  file_stable_seconds: 0.5      # wait for the writer to finish before converting
+  max_prefetch_seconds: 4       # sender may run this far ahead of client ACKs
+  idle_prebuffer_frames: 8      # server-produced idle frames kept ahead of ACKs
+  hold_max_frames: 12           # mid-answer underrun: repeat last frame up to this many, then idle
+  process_existing: false       # process files already in data/audio at startup
+  extensions: [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"]
+
+audio_stream:
+  sample_rate: 16000
+  channels: 1
+  format: s16le
+  window_frames: 24             # one inference batch at 24fps (~0.83s)
+  context_left_ms: 200          # real audio context before each output window
+  context_right_ms: 300         # lookahead context after each output window
+  overlap_frames: 4             # boundary blend from right context
+  pause_overlap_frames: 4       # temporarily = overlap_frames until the seam overlap-count fix
+  pause_boundary_frames: 6      # inspect +/- frames around boundary for pause
+  max_pending_windows: 12       # upstream backpressure limit
+  max_buffer_seconds: 5
