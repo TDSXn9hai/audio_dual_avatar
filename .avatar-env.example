@@ -1,0 +1,18 @@
+# Optional overrides sourced by start_avatar.sh.
+#
+# Single GPU:
+#   MINICPM_CUDA_VISIBLE_DEVICES=0
+#   MUSETALK_CUDA_VISIBLE_DEVICES=0
+#
+# Two GPUs:
+#   MINICPM_CUDA_VISIBLE_DEVICES=0
+#   MUSETALK_CUDA_VISIBLE_DEVICES=1
+#
+# Both values may also be CUDA UUIDs (GPU-...) instead of numeric indexes.
+MINICPM_CUDA_VISIBLE_DEVICES=0
+MUSETALK_CUDA_VISIBLE_DEVICES=1
+
+# Keep the local 480x864 output size. Set a positive width only when a lower
+# bandwidth stream is explicitly desired.
+AVATAR_STREAM_FORMAT=webp
+AVATAR_STREAM_MAX_WIDTH=0

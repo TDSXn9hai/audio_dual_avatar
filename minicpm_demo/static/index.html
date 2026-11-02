@@ -143,6 +143,7 @@
             flex-shrink: 0;
         }
         .mode-card.turnbased .card-icon { background: #e8e8e3; }
+        .mode-card.avatar .card-icon { background: #ede8ff; }
         .mode-card.omni .card-icon { background: #d4e4f7; }
         .mode-card.audio .card-icon { background: #e8f0e8; }
         .mode-card.mobile .card-icon { background: #f3e8ff; }
@@ -450,6 +451,7 @@
     const t = window.I18n?.t || {};
 
     const APP_CARD_META = {
+        avatar: { css: 'avatar', icon: '🧑‍💻', desc: t.digitalHumanDesc, nameKey: 'digitalHuman' },
         turnbased: { css: 'turnbased', icon: '💬', desc: t.turnbasedDesc, nameKey: 'turnbasedChat' },
         omni:      { css: 'omni',      icon: '🎥', desc: t.omniDesc, nameKey: 'omniFullDuplex' },
         audio_duplex: { css: 'audio', icon: '🎤', desc: t.audioDuplexDesc, nameKey: 'audioDuplexTitle' },
@@ -517,7 +519,7 @@
                 });
             }) : [];
 
-        cardsEl.innerHTML = [renderCard(MOBILE_PREVIEW_CARD), ...appCards].join('');
+        cardsEl.innerHTML = [...appCards, renderCard(MOBILE_PREVIEW_CARD)].join('');
     })();
 
     (function() {

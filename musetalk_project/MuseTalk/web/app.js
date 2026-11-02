@@ -527,11 +527,13 @@ function handleFrame(arrayBuffer) {
   const ptsUs = Number(view.getBigInt64(12));
   const frameIndex = view.getUint32(20);
   const payload = new Uint8Array(arrayBuffer, 24);
+  const isWebp = payload[0] === 0x52 && payload[1] === 0x49
+    && payload[8] === 0x57 && payload[9] === 0x45;
   if (segmentId !== 0xffffffff && ui.ignoredSegmentIds.has(segmentId)) {
     return;
   }
 
-  createImageBitmap(new Blob([payload], { type: "image/jpeg" }))
+  createImageBitmap(new Blob([payload], { type: isWebp ? "image/webp" : "image/jpeg" }))
     .then((bitmap) => {
       if (ui.ended) {
         bitmap.close();

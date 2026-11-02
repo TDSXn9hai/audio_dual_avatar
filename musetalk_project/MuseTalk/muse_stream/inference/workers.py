@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import threading
 import time
 import traceback
@@ -348,6 +349,12 @@ def live_encode_worker(
     count = 0
     started = time.monotonic()
     last_encoded: bytes | None = None
+    # WebP is the default avatar codec. JPEG remains a transparent fallback if
+    # the local OpenCV build was compiled without WebP support.
+    stream_width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
+    use_webp = os.environ.get("AVATAR_STREAM_FORMAT", "webp").lower() == "webp"
+    extension = ".webp" if use_webp else ".jpg"
+    quality_key = cv2.IMWRITE_WEBP_QUALITY if use_webp else cv2.IMWRITE_JPEG_QUALITY
     try:
         while not stop.is_set():
             item = get_blocking(raw_queue, loop, stop)
@@ -370,7 +377,6 @@ def live_encode_worker(
                 # Repeat the whole composite: re-blending the old face onto a
                 # newer background frame would misalign it.
                 frame_kind = FRAME_SILENT
-                jpeg = last_encoded
             else:
                 if frame_kind == FRAME_HOLD:
                     frame_kind = FRAME_SILENT
@@ -380,21 +386,30 @@ def live_encode_worker(
                     combined = pipeline.blend_frame(frame_index, frame)
                 else:
                     combined = frame
+                if stream_width > 0 and combined.shape[1] > stream_width:
+                    height = round(combined.shape[0] * stream_width / combined.shape[1])
+                    combined = cv2.resize(combined, (stream_width, height), interpolation=cv2.INTER_AREA)
                 ok, encoded = cv2.imencode(
-                    ".jpg",
+                    extension,
                     combined,
-                    [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
+                    [quality_key, args.jpeg_quality],
                 )
+                if not ok and use_webp:
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        combined,
+                        [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
+                    )
                 if not ok:
                     continue
-                jpeg = encoded.tobytes()
-                last_encoded = jpeg
+                encoded_bytes = encoded.tobytes()
+                last_encoded = encoded_bytes
             packet = pack_frame(
                 frame_kind,
                 segment_id,
                 pts_us,
                 frame_index,
-                jpeg,
+                last_encoded,
             )
             if not put_blocking(
                 network_queue,

@@ -21,6 +21,7 @@ const _NAV_HIDDEN_APP_IDS = new Set(['half_duplex_audio']);
 
 // Map API app_id → i18n key for display name override.
 const _APP_NAME_I18N = {
+    avatar: 'digitalHuman',
     turnbased: 'turnbasedChat',
     omni: 'omniFullDuplex',
     audio_duplex: 'audioDuplexTitle',
@@ -54,7 +55,7 @@ function _renderNav(apps, currentAppId) {
             return `<a href="${a.route}"${active}>${label}</a>`;
         });
 
-    navEl.innerHTML = `<a href="/"${homeActive}>${t.home}</a>` + extras + links.join('');
+    navEl.innerHTML = `<a href="/"${homeActive}>${t.home}</a>` + links.join('') + extras;
 
 }
 

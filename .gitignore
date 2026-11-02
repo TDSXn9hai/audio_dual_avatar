@@ -1,25 +1,67 @@
-# Model weights (downloaded by install.sh, checked by weights.sha256)
+# Local secrets and environment
+.avatar-env
+.avatar-env.local
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+**/.venv/
+venv/
+**/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.cache/
+**/.cache/
+
+# Model weights and avatar caches
 minicpm_demo/model/
 musetalk_project/MuseTalk/models/
+musetalk_project/MuseTalk/results/
 musetalk_project/MuseTalk/musetalk/utils/face_detection/detection/sfd/s3fd.pth
 *.safetensors
+*.pth
+*.pt
+*.ckpt
 
-# Environments and caches
-.venv/
-minicpm_demo/.venv/
-musetalk_project/venv/
-.cache/
-musetalk_project/.cache/
-__pycache__/
-*.pyc
-
-# Generated at install / run time
-minicpm_demo/.bin/
-musetalk_project/MuseTalk/ffmpeg-4.4-amd64-static/ffmpeg
-minicpm_demo/certs/
+# Runtime data, logs and generated media
 .run/
-minicpm_demo/.run-logs/
+**/.run-logs/
+*.log
+minicpm_demo/config.json
+minicpm_demo/.bin/
+minicpm_demo/data/
 minicpm_demo/tmp/
-minicpm_demo/data/sessions/
-musetalk_project/MuseTalk/results/live_audio/
+minicpm_demo/output/
+minicpm_demo/certs/
+minicpm_demo/demo_project.tar.gz
+musetalk_project/MuseTalk/output/
+musetalk_project/MuseTalk/data/audio/*
+!musetalk_project/MuseTalk/data/audio/README.md
+musetalk_project/digital-human-streaming/
+musetalk_project/digital-human-streaming.tar
+musetalk_project/activate.sh
+musetalk_project/download_weights_local.sh
+musetalk_project/MuseTalk/musetalk_inference_report.md
+musetalk_project/hadoop-afs-*.md
+
+# Large packages and build output
 dist/
+**/dist/
+*.tar
+*.tar.gz
+*.tgz
+node_modules/
+**/node_modules/
+
+# Generated docs/frontends
+minicpm_demo/static/docs/
+minicpm_demo/docs-app/.next/
+minicpm_demo/docs-app/.source/
+minicpm_demo/docs-app/out/
+minicpm_demo/static/mobile/

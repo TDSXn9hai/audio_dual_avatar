@@ -29,7 +29,7 @@ import {
 import { startDingDongLoop, playAlarmBell, playSessionChime } from '../duplex/lib/queue-chimes.js';
 import { createTtsRefController } from '../duplex/ui/tts-ref-controller.js';
 import { initRefAudio } from '../duplex/ui/ref-audio-init.js';
-import { AvatarPlayer } from '../avatar/avatar-player.js';
+import { AvatarPlayer } from '../avatar/avatar-player.js?v=webp1';
 
 // ============================================================================
 // Constants & State

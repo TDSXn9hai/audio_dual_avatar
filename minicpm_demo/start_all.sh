@@ -99,7 +99,7 @@ wait_http "https://127.0.0.1:${GATEWAY_PORT}/health" "gateway" 60
 wait_http "http://127.0.0.1:8007/health" "gateway internal" 60
 
 start_process backend env \
-    CUDA_VISIBLE_DEVICES=0 \
+    CUDA_VISIBLE_DEVICES="${MINICPM_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}" \
     "${PYTHON}" -m py_backend.server \
     --host 0.0.0.0 \
     --port 22500 \

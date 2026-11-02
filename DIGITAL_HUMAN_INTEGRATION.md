@@ -5,7 +5,8 @@
 ## 1. 总体架构
 
 ```
-浏览器 https://<host>:8006/avatar
+浏览器 https://<host>:8006/avatar（第一入口，纯音频数字人）
+或 https://<host>:8006/omni（第二入口，完整 Omni 页面）
   │  麦克风 PCM (16k f32, 1s/块) [+ 摄像头 JPEG，可选]          ▲ 数字人 JPEG 帧 + 分段 WAV
   ▼                                                              │ (同源代理 /avatar-live/*)
 gateway.py :8006 ──► worker :22400 ──► py_backend :22500 (MiniCPM-o, GPU0)
@@ -17,7 +18,7 @@ AvatarBridge ── ws://127.0.0.1:8000/ws/minicpm ──► MuseTalk stream_ser
 
 - MiniCPM-o 负责"听/说"决策和语音生成；MuseTalk 只根据 MiniCPM-o 的输出音频生成口型视频。
 - 调度原则：**MuseTalk 的视频生成完全受 MiniCPM-o 的音频生成调度**。轮次由 `response_id` 区分，`listen` 表示轮次结束，打断由 MiniCPM-o 一侧的信号触发。
-- 浏览器只打开一个页面 `/avatar`；MiniCPM-o 自己的播放器静音，模型语音由数字人页面随口型同步播放。
+- `/avatar` 是独立的纯音频数字人页面，`/omni` 保留原有的视频输入、预设、Metrics、录制和文件模式。两个页面都复用数字人播放器；MiniCPM-o 自己的播放器静音，模型语音由数字人页面随口型同步播放。
 
 ## 2. 运行环境
 
@@ -43,6 +44,7 @@ AvatarBridge ── ws://127.0.0.1:8000/ws/minicpm ──► MuseTalk stream_ser
 ```
 
 - 启动顺序：先启动 MuseTalk（GPU 0，端口 8000，配置 `configs/streaming_duplex.yaml`），等 `/api/status` 返回 ready；再用共享 venv 调用 `minicpm_demo/start_all.sh`（gateway 8006、backend 22500、worker 22400）。
+- `start_avatar.sh` 会读取 `AVATAR_ENV_FILE`（默认 `./.avatar-env`），支持 `MINICPM_CUDA_VISIBLE_DEVICES` 和 `MUSETALK_CUDA_VISIBLE_DEVICES` 拆分双卡；未配置时两者都回落到 `CUDA_VISIBLE_DEVICES` 或 GPU 0。可参考 `.avatar-env.example`，不要提交机器专用 UUID。
 - 为 gateway 设置两个环境变量：`AVATAR_BRIDGE_URL=ws://127.0.0.1:8000/ws/minicpm`（旁路），`AVATAR_HTTP_URL=http://127.0.0.1:8000`（页面代理）。
 - 重复 start 会跳过已运行的服务；stop 先等 30 秒，进程未退出再发 `kill -9`。
 - 日志：MuseTalk 在 `.run/logs/musetalk.log`，MiniCPM 在 `minicpm_demo/.run-logs/`。
@@ -102,7 +104,9 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 ### 3.5 打断与清空
 
 - 协议层面，MiniCPM-o 被用户打断和正常结束都表现为"说话 → 听"，无法区分；因此"说话 → 听"一律按正常结束处理，剩余画面放完（约 1 秒以上）。
-- 真正清空只由 `force_listen` 和"无 listen 换回答"触发。
+- `/avatar` 在数字人说话时监测麦克风 RMS，持续约 180ms 后自动触发 `force_listen`，同时本地立即停播并丢弃旧画面。
+- 自动打断会启动 2500ms 的 flush watchdog。正常收到 `flush` 时取消；超时则清除丢弃状态、重置播放器时间轴并重连 viewer，避免页面永久卡在"正在听你说"。
+- 真正清空仍由 `force_listen` 和"无 listen 换回答"触发。
 - MuseTalk 原有的打断（viewer 发起，需要 `segment_id`/`frame_index`，10 秒后会**重放**旧回答）不适合全双工，因此新增服务端主动清空：
   - `SegmentManager.flush_all()`：取消所有排队中和生成中的片段，清掉 viewer 的打断/恢复状态，下一帧从当前播放位置之后重新开始。
   - `/ws/live` 向 viewer 推送 `{"type":"flush","frame_index":F}`，viewer 立即停掉已排好的音频并丢弃之后的帧。
@@ -151,7 +155,9 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 
 ### 5.1 页面与同源代理（`gateway.py`）
 
-- `/avatar`：复用 Omni 页面 `static/omni/omni.html`，前端按路径进入数字人模式；未设置 `AVATAR_HTTP_URL` 时跳转回 `/omni`。`/omni` 行为不变。
+- `/avatar`：第一入口，返回独立页面 `static/avatar/avatar.html`，使用纯音频 `mode=audio` 和自动打断。`/omni` 是第二入口，保留原完整 Omni 页面。
+- App Registry 中 `avatar` 排在 `omni` 前，首页卡片和全局导航按此顺序生成。
+- 未设置 `AVATAR_HTTP_URL` 或数字人入口被禁用时，`/avatar` 回退到 `/omni`。
 - gateway 走 HTTPS，MuseTalk 是 http/ws，浏览器会拦截混合内容，因此由 gateway 同源转发：
   - `GET /avatar-live/api/status`
   - `GET /avatar-live/api/live/audio/{id}`（每段 WAV）
@@ -160,6 +166,7 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 ### 5.2 数字人播放器（`static/avatar/avatar-player.js`，`AvatarPlayer`）
 
 - 从 MuseTalk `web/app.js` 移植 `/ws/live` 客户端：解析 24 字节帧头（`MTF1`、kind、segment id、pts_us、frame index）、按 `segment` 消息拉取并解码 WAV、ACK 回传播放进度、处理 `flush`。
+- 默认接收 WebP 帧（同时兼容 JPEG）；MuseTalk worker 通过 `AVATAR_STREAM_FORMAT=webp` 编码。保持本地现有 480×864、`prebuffer: 32`、客户端 8 帧起播和 4 秒 prefetch 参数。
 - 在 Start 点击时创建 AudioContext 并连接（满足浏览器自动播放限制，也保证模型开口前 viewer 已连上，MuseTalk 只在有 viewer 时渲染）。断开后每 3 秒自动重连。
 - **音视频同步（音频为主时钟）**：
   - 每个窗口收到 8 帧（`CLIENT_PREBUFFER_FRAMES`）且音频解码完成后才排上播放。
@@ -169,7 +176,7 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
   - 这一机制修复了"第一句音频晚于视频"的问题：原逻辑使用服务端的 prebuffer（32 帧），首窗 20 帧必须全部到齐声音才开始，而画面按时间点先播放。
 - 字幕：按 `prebuffer/fps + 300ms`（约 1.6 秒）推后显示，只显示最后约 48 个字。
 
-### 5.3 Omni 页面的数字人模式（`static/omni/*`、`static/duplex/lib/audio-player.js`）
+### 5.3 Omni 页面：第二入口（`static/omni/*`、`static/duplex/lib/audio-player.js`）
 
 - `AudioPlayer.setMuted()`：输出前加音量节点。数字人模式下静音，排队计时、指标和录制回调照常工作，避免两路声音。
 - 布局（`applyAvatarLayout()` 移动现有元素，id 和事件绑定不变）：
@@ -187,7 +194,9 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 新增：
 
 - `start_avatar.sh`、`.venv/`（项目根目录）
+- `.avatar-env.example`、`.gitignore`
 - `minicpm_demo/gateway_modules/avatar_bridge.py`
+- `minicpm_demo/static/avatar/avatar.html`、`avatar.css`、`avatar-app.js`、`avatar-poster.jpg`、`speech-interruptor.js`
 - `minicpm_demo/static/avatar/avatar-player.js`
 - `musetalk_project/MuseTalk/muse_stream/audio/minicpm.py`
 - `musetalk_project/MuseTalk/configs/streaming_duplex.yaml`
@@ -209,6 +218,11 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 | 回答中途 `bridge.flush` | viewer 10ms 内收到清空，同回答后续 3 块被丢弃，下一轮正常 |
 | 经 gateway 代理的 viewer（wss） | 38 秒 943 帧（约 24.8fps），9 段音频全部下载成功，清空送达 |
 | 实时全链路（MiniCPM-o 探测 → 旁路 → MuseTalk → 代理 viewer） | 成功，音视频与音频两种模式都测过 |
+| 新入口与旧入口 | `/avatar`、`/omni` 均返回 200；`/api/apps` 顺序为 `avatar → omni` |
+| 双卡启动 | MiniCPM-o 在 GPU 0、MuseTalk 在 GPU 1 启动并通过健康检查 |
+| 直连 WebP 流 | `/ws/audio → /ws/live` 前 12 帧全部为 WebP，0 帧 JPEG |
+| gateway WSS 代理 | `/avatar-live/ws/live` 前 4 帧全部为 WebP |
+| 自动打断超时合同 | 2500ms watchdog 已覆盖播放器丢弃态和页面等待态 |
 | JS 语法 | esprima 检查通过（机器上无 node，也无浏览器） |
 
 未在浏览器中实际验证：页面显示效果、布局、浏览器回声消除效果、`/avatar` 页面的实际音画同步（"第一句音频晚于视频"已由用户确认修复）。

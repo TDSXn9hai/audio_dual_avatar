@@ -1,7 +1,7 @@
 /**
  * AvatarPlayer — MuseTalk /ws/live client for the omni page in avatar mode.
  *
- * Ported from MuseTalk web/app.js. Each binary message is one JPEG frame
+ * Ported from MuseTalk web/app.js. Each binary message is one encoded frame
  * behind a 24-byte header (magic "MTF1", kind, segment id, pts_us, frame
  * index). Each `segment` message points at a WAV that is scheduled on the
  * AudioContext at the segment's pts; the audio clock picks the frame to
@@ -13,6 +13,7 @@ const IDLE_SEGMENT = 0xffffffff;
 const FRAME_IDLE = 0;
 const FRAME_SILENT = 2;
 const RETRY_MS = 3000;
+export const INTERRUPT_FLUSH_TIMEOUT_MS = 2500;
 // Frames of a segment needed before its audio may start (server meta.prebuffer
 // is the answer-start delay, already applied on the server timeline).
 const CLIENT_PREBUFFER_FRAMES = 8;
@@ -26,8 +27,15 @@ export class AvatarPlayer {
      * @param {HTMLElement} [opts.statusEl]   text status line
      * @param {HTMLElement} [opts.subtitleEl] subtitle line over the avatar
      * @param {string} [opts.base]            same-origin proxy prefix
+     * @param {number} [opts.interruptTimeoutMs] flush recovery watchdog
      */
-    constructor({ canvas, statusEl = null, subtitleEl = null, base = '/avatar-live' }) {
+    constructor({
+        canvas,
+        statusEl = null,
+        subtitleEl = null,
+        base = '/avatar-live',
+        interruptTimeoutMs = INTERRUPT_FLUSH_TIMEOUT_MS,
+    }) {
         this.canvas = canvas;
         this.statusEl = statusEl;
         this.subtitleEl = subtitleEl;
@@ -44,12 +52,23 @@ export class AvatarPlayer {
         this._retryTimer = null;
         this._subtitleTimers = [];
         this._speaking = null;
+        this.interruptTimeoutMs = interruptTimeoutMs;
+        this.onInterruptAcknowledged = null;
+        this.onInterruptTimeout = null;
+        this._interruptTimer = null;
+        this._interruptToken = 0;
         this._resetTimeline();
     }
 
     /** Subtitle lag ≈ server answer-start buffer + render/network margin. */
     get latencyMs() {
         return Math.round((this.prebuffer / this.fps) * 1000) + 300;
+    }
+
+    get hasPendingSpeech() {
+        if (!this.ctx) return false;
+        return this.segments.some((segment) => segment.startAt === null
+            || segment.startAt + segment.duration > this.ctx.currentTime);
     }
 
     /**
@@ -72,12 +91,23 @@ export class AvatarPlayer {
 
     close() {
         this.closed = true;
+        this._clearInterruptWatchdog();
         clearTimeout(this._retryTimer);
         if (this._raf) cancelAnimationFrame(this._raf);
         this._raf = 0;
         this.clearSubtitle();
         if (this.ws) this.ws.close();
         this._stopAudio();
+    }
+
+    /** Stop queued playback immediately; the next forced-listen chunk flushes the server. */
+    interrupt() {
+        this._discardUntilFlush = true;
+        this._dropFromCurrent();
+        this.clearSubtitle();
+        this._speaking = false;
+        this._setStatus('idle', '正在听你说');
+        this._startInterruptWatchdog();
     }
 
     /** Show model text after the avatar latency so it lines up with the mouth. */
@@ -165,6 +195,7 @@ export class AvatarPlayer {
             this._setStatus('idle', '数字人待机');
             break;
         case 'segment': {
+            if (this._discardUntilFlush) break;
             const segment = {
                 id: msg.id,
                 totalFrames: Number(msg.total_frames || 0),
@@ -182,12 +213,23 @@ export class AvatarPlayer {
             break;
         }
         case 'flush':
+            this._discardUntilFlush = false;
+            this._clearInterruptWatchdog();
             // Upstream barge-in: drop the current answer, nothing resumes.
             this._dropFromCurrent();
             this.clearSubtitle();
             // The server restarts its timeline right after this frame.
             if (Number.isFinite(msg.frame_index)) {
                 this.lastDrawn = Math.min(this.lastDrawn, msg.frame_index);
+                for (const [index, frame] of this.frames) {
+                    if (index > msg.frame_index) {
+                        frame.bitmap.close();
+                        this.frames.delete(index);
+                    }
+                }
+            }
+            if (typeof this.onInterruptAcknowledged === 'function') {
+                this.onInterruptAcknowledged();
             }
             break;
         case 'error':
@@ -202,6 +244,7 @@ export class AvatarPlayer {
     // ---- media ----
 
     _onFrame(buffer) {
+        if (this._discardUntilFlush) return;
         if (buffer.byteLength <= 24) return;
         const view = new DataView(buffer);
         if (view.getUint32(0) !== FRAME_MAGIC) return;
@@ -210,7 +253,10 @@ export class AvatarPlayer {
         const ptsUs = Number(view.getBigInt64(12));
         const index = view.getUint32(20);
         const ws = this.ws;
-        createImageBitmap(new Blob([new Uint8Array(buffer, 24)], { type: 'image/jpeg' }))
+        const pixels = new Uint8Array(buffer, 24);
+        const webp = pixels[0] === 0x52 && pixels[1] === 0x49
+            && pixels[8] === 0x57 && pixels[9] === 0x45;
+        createImageBitmap(new Blob([pixels], { type: webp ? 'image/webp' : 'image/jpeg' }))
             .then((bitmap) => {
                 if (this.ws !== ws) { bitmap.close(); return; }
                 const old = this.frames.get(index);
@@ -224,6 +270,34 @@ export class AvatarPlayer {
                 this._scheduleReady();
             })
             .catch(() => {});
+    }
+
+    _clearInterruptWatchdog() {
+        if (this._interruptTimer !== null) {
+            clearTimeout(this._interruptTimer);
+            this._interruptTimer = null;
+        }
+        this._interruptToken += 1;
+    }
+
+    _startInterruptWatchdog() {
+        this._clearInterruptWatchdog();
+        const token = this._interruptToken;
+        const timeoutMs = Math.max(250, Number(this.interruptTimeoutMs) || INTERRUPT_FLUSH_TIMEOUT_MS);
+        this._interruptTimer = setTimeout(() => {
+            this._interruptTimer = null;
+            if (token !== this._interruptToken || !this._discardUntilFlush) return;
+            console.warn(`[AvatarPlayer] no flush after ${timeoutMs}ms; recovering viewer`);
+            this._discardUntilFlush = false;
+            this._resetTimeline();
+            this._setStatus('error', '数字人未收到打断确认，正在重连…');
+            if (typeof this.onInterruptTimeout === 'function') this.onInterruptTimeout();
+            if (this.ws) {
+                try { this.ws.close(); } catch (_) { /* reconnect below */ }
+            } else if (!this.closed) {
+                this._connect();
+            }
+        }, timeoutMs);
     }
 
     async _loadAudio(segment) {
@@ -414,6 +488,8 @@ export class AvatarPlayer {
     }
 
     _resetTimeline() {
+        this._discardUntilFlush = false;
+        this._clearInterruptWatchdog();
         for (const frame of this.frames.values()) frame.bitmap.close();
         this.frames = new Map();
         this.segments = [];

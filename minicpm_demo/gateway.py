@@ -33,6 +33,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, Response, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from gateway_modules.models import (
     GatewayWorkerStatus,
@@ -223,6 +224,8 @@ internal_app = FastAPI(
     redoc_url=None,
 )
 
+# Compress page assets and JSON without buffering WebSocket streams.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 _PUBLIC_ADMIN_ENABLED = os.getenv("ENABLE_PUBLIC_ADMIN", "").lower() in {"1", "true", "yes", "on"}
 _BLOCKED_ADMIN_PATHS = {"/admin", "/admin/"}
@@ -1314,15 +1317,16 @@ async def omni():
 
 
 # ============ 数字人(MuseTalk)页面与同源代理 ============
-# /avatar 复用 Omni 页面(前端按路径进入数字人模式);MuseTalk 的状态、
+# /avatar 是纯音频数字人入口,/omni 保留完整 Omni 页面;MuseTalk 的状态、
 # 分段音频和 /ws/live 视频帧经 gateway 转发,避免 HTTPS 页面混合内容。
 
 @app.get("/avatar", response_class=HTMLResponse)
 async def avatar_page():
-    """Omni Duplex + MuseTalk 数字人页面"""
-    if not app_registry.is_enabled("omni") or not avatar_http_url():
-        return RedirectResponse(url="/omni", status_code=302)
-    return await omni()
+    """Dedicated audio-only duplex avatar page."""
+    if not app_registry.is_enabled("avatar") or not avatar_http_url():
+        fallback = "/omni" if app_registry.is_enabled("omni") else "/"
+        return RedirectResponse(url=fallback, status_code=302)
+    return FileResponse(os.path.join(static_dir, "avatar", "avatar.html"))
 
 
 @app.get("/avatar-live/api/status")

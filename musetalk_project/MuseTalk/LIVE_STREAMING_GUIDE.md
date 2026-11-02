@@ -13,7 +13,7 @@
 ### 1.1 启动
 
 ```bash
-cd /path/to
+cd /root/paddlejob/workspace/env_run
 ./start_streaming.sh
 ```
 
