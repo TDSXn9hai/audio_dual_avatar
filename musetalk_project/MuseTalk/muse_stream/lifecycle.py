@@ -46,6 +46,8 @@ def initialize(state: AppState) -> None:
         if state.model.avatar.frame_list_cycle:
             frame = state.model.avatar.frame_list_cycle[0]
             state.model.height, state.model.width = frame.shape[:2]
+        state.model.avatar_ready = True
+        state.model.avatar_revision = 1
 
         state.service.status = "ready"
         state.service.ready = True
@@ -69,6 +71,8 @@ def initialize(state: AppState) -> None:
             threading.Thread(target=monitor.run, daemon=True).start()
         log("ready")
     except Exception as exc:  # pragma: no cover - surfaced through /api/status
+        state.model.avatar_ready = False
+        state.model.avatar_switching = False
         state.service.status = "error"
         state.service.error = f"{type(exc).__name__}: {exc}"
         log(traceback.format_exc())

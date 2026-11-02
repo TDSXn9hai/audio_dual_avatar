@@ -6,6 +6,7 @@
     },
     "audio": {
         "ref_audio_path": "assets/ref_audio/ref_minicpm_signature.wav",
+        "avatar_ref_audio_path": "assets/ref_audio/ref_avatar_default.wav",
         "playback_delay_ms": 200,
         "chat_vocoder": "token2wav"
     },

@@ -73,6 +73,13 @@ class AudioConfig(BaseModel):
         default="assets/ref_audio/ref_minicpm_signature.wav",
         description="默认参考音频路径（TTS 声音克隆，相对于 minicpmo45_service/）",
     )
+    avatar_ref_audio_path: Optional[str] = Field(
+        default="assets/ref_audio/ref_avatar_default.wav",
+        description=(
+            "纯音频数字人 /avatar 页面使用的参考音频路径；"
+            "不影响 /omni 和全局 TTS 默认音色"
+        ),
+    )
     playback_delay_ms: int = Field(
         default=200,
         description="前端收到首个 SPEAK chunk 后延迟多少 ms 开始播放（吸收网络/推理抖动）",
@@ -255,6 +262,10 @@ class ServiceConfig(BaseModel):
     @property
     def ref_audio_path(self) -> Optional[str]:
         return self.audio.ref_audio_path
+
+    @property
+    def avatar_ref_audio_path(self) -> Optional[str]:
+        return self.audio.avatar_ref_audio_path
 
     @property
     def chat_vocoder(self) -> str:

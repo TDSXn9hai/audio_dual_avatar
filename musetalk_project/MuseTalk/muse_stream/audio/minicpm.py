@@ -51,39 +51,49 @@ class MiniCPMBridgeSession(StreamAudioSession):
         state = self.state
         if not await self._admit():
             return
-        async with state.stream_input.lock:
-            state.stream_input.connected = True
-            state.stream_input.samples_received = 0
-            state.stream_input.windows_submitted = 0
-            state.stream_input.dropped_samples = 0
-            await self.websocket.send_json(
-                {
-                    "type": "bridge_meta",
-                    "source_rate": SOURCE_RATE,
-                    "sample_rate": self.sample_rate,
-                    "first_window_frames": self.first_window_frames,
-                    "window_frames": self.window_frames,
-                    "context_right_frames": self.context_right_frames,
-                }
+        if not self._reserve_avatar_lease():
+            await self._send_error(
+                "数字人形象正在切换，请稍后重试",
+                code="avatar_switching",
             )
-            log(
-                "minicpm bridge connected: window_frames="
-                f"{self.first_window_frames}/{self.window_frames} "
-                f"context_frames={self.context_left_frames}/"
-                f"{self.context_right_frames}"
-            )
-            try:
-                await self._receive_json_loop()
-            except WebSocketDisconnect:
-                pass
-            finally:
-                await self._end_turn("disconnect")
-                state.stream_input.connected = False
-                log(
-                    "minicpm bridge disconnected: "
-                    f"turns={self.turns} flushes={self.flushes} "
-                    f"windows={state.stream_input.windows_submitted}"
+            await self.websocket.close(code=1013)
+            return
+        try:
+            async with state.stream_input.lock:
+                state.stream_input.connected = True
+                state.stream_input.samples_received = 0
+                state.stream_input.windows_submitted = 0
+                state.stream_input.dropped_samples = 0
+                await self.websocket.send_json(
+                    {
+                        "type": "bridge_meta",
+                        "source_rate": SOURCE_RATE,
+                        "sample_rate": self.sample_rate,
+                        "first_window_frames": self.first_window_frames,
+                        "window_frames": self.window_frames,
+                        "context_right_frames": self.context_right_frames,
+                    }
                 )
+                log(
+                    "minicpm bridge connected: window_frames="
+                    f"{self.first_window_frames}/{self.window_frames} "
+                    f"context_frames={self.context_left_frames}/"
+                    f"{self.context_right_frames}"
+                )
+                try:
+                    await self._receive_json_loop()
+                except WebSocketDisconnect:
+                    pass
+                finally:
+                    await self._end_turn("disconnect")
+                    state.stream_input.connected = False
+                    log(
+                        "minicpm bridge disconnected: "
+                        f"turns={self.turns} flushes={self.flushes} "
+                        f"windows={state.stream_input.windows_submitted}"
+                    )
+        finally:
+            self._release_avatar_lease()
 
     async def _receive_json_loop(self) -> None:
         while not self.state.service.exit_requested:

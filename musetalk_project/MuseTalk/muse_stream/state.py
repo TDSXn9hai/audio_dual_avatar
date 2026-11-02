@@ -31,9 +31,16 @@ class ServiceState:
 
 @dataclass
 class ModelState:
+    default_avatar_id: str = ""
     avatar_id: str = ""
     avatar: Any = None
     runtime: Runtime | None = None
+    avatar_ready: bool = False
+    avatar_switching: bool = False
+    avatar_revision: int = 0
+    avatar_lock: threading.RLock = field(default_factory=threading.RLock)
+    avatar_admission_lock: threading.RLock = field(default_factory=threading.RLock)
+    avatar_leases: int = 0
     fps: int = 24
     batch_size: int = 20
     prebuffer: int = 24

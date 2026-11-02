@@ -798,6 +798,49 @@ async def get_preset_audio(mode: str, preset_id: str):
 
 # 缓存：启动后首次请求时加载，之后直接返回
 _default_ref_audio_cache: Optional[Dict[str, Any]] = None
+_avatar_ref_audio_cache: Optional[Dict[str, Any]] = None
+
+
+def _load_configured_ref_audio(
+    ref_path_value: Optional[str],
+    *,
+    label: str,
+) -> Dict[str, Any]:
+    if not ref_path_value:
+        raise HTTPException(status_code=404, detail=f"No {label} ref audio configured")
+
+    ref_path = ref_path_value
+    if not os.path.isabs(ref_path):
+        ref_path = os.path.join(os.path.dirname(__file__), ref_path)
+    if not os.path.exists(ref_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{label} ref audio not found: {ref_path_value}",
+        )
+
+    try:
+        import base64
+        import librosa
+        import numpy as np
+
+        audio, sr = librosa.load(ref_path, sr=16000, mono=True)
+        duration = len(audio) / 16000
+        audio_bytes = audio.astype(np.float32).tobytes()
+        payload = {
+            "name": os.path.basename(ref_path_value),
+            "duration": round(duration, 1),
+            "sample_rate": 16000,
+            "samples": len(audio),
+            "base64": base64.b64encode(audio_bytes).decode("ascii"),
+        }
+        logger.info(
+            f"{label} ref audio loaded: {payload['name']} "
+            f"({duration:.1f}s, {len(audio)} samples)"
+        )
+        return payload
+    except Exception as e:
+        logger.error(f"Failed to load {label} ref audio: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to load ref audio: {e}")
 
 
 @app.get("/api/default_ref_audio")
@@ -814,47 +857,27 @@ async def get_default_ref_audio():
 
     from config import get_config
     cfg = get_config()
+    _default_ref_audio_cache = _load_configured_ref_audio(
+        cfg.ref_audio_path,
+        label="Default",
+    )
+    return _default_ref_audio_cache
 
-    if not cfg.ref_audio_path:
-        raise HTTPException(status_code=404, detail="No default ref audio configured")
 
-    # 解析路径（支持相对路径，相对于 minicpmo45_service/）
-    ref_path = cfg.ref_audio_path
-    if not os.path.isabs(ref_path):
-        ref_path = os.path.join(os.path.dirname(__file__), ref_path)
+@app.get("/api/avatar_ref_audio")
+async def get_avatar_ref_audio():
+    """Return the /avatar-only voice reference as float32 PCM base64."""
+    global _avatar_ref_audio_cache
+    if _avatar_ref_audio_cache is not None:
+        return _avatar_ref_audio_cache
 
-    if not os.path.exists(ref_path):
-        raise HTTPException(status_code=404, detail=f"Default ref audio not found: {cfg.ref_audio_path}")
-
-    try:
-        import base64
-        import librosa
-        import numpy as np
-
-        # 加载并重采样为 16kHz mono float32（与前端上传格式一致）
-        audio, sr = librosa.load(ref_path, sr=16000, mono=True)
-        duration = len(audio) / 16000
-
-        # 转换为 base64（PCM float32）
-        audio_bytes = audio.astype(np.float32).tobytes()
-        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-
-        _default_ref_audio_cache = {
-            "name": os.path.basename(cfg.ref_audio_path),
-            "duration": round(duration, 1),
-            "sample_rate": 16000,
-            "samples": len(audio),
-            "base64": audio_b64,
-        }
-        logger.info(
-            f"Default ref audio loaded: {_default_ref_audio_cache['name']} "
-            f"({duration:.1f}s, {len(audio)} samples)"
-        )
-        return _default_ref_audio_cache
-
-    except Exception as e:
-        logger.error(f"Failed to load default ref audio: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load ref audio: {e}")
+    from config import get_config
+    cfg = get_config()
+    _avatar_ref_audio_cache = _load_configured_ref_audio(
+        cfg.avatar_ref_audio_path,
+        label="Avatar",
+    )
+    return _avatar_ref_audio_cache
 
 
 # ============ 素材管理 API ============
@@ -1339,6 +1362,66 @@ async def avatar_live_status():
             resp = await client.get(f"{base}/api/status")
         return Response(content=resp.content, status_code=resp.status_code,
                         media_type="application/json")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
+
+
+@app.get("/avatar-live/api/avatars")
+async def avatar_live_list():
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{base}/api/avatars")
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
+
+
+@app.get("/avatar-live/api/avatar")
+async def avatar_live_current():
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{base}/api/avatar")
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
+
+
+@app.post("/avatar-live/api/avatar/select")
+async def avatar_live_select(request: Request):
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{base}/api/avatar/select",
+                json=payload,
+            )
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
 

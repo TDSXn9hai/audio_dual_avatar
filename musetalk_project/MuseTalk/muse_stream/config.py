@@ -348,6 +348,7 @@ def load_config(config_name: str) -> LoadedConfig:
 
 def configure_state(state: AppState, loaded: LoadedConfig) -> None:
     state.args = loaded.args
+    state.model.default_avatar_id = loaded.avatar_id
     state.model.avatar_id = loaded.avatar_id
     state.model.fps = loaded.fps
     state.model.batch_size = loaded.batch_size

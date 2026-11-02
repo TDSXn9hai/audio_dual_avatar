@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
+from ..avatar_registry import (
+    AvatarError,
+    activate_avatar,
+    list_avatar_caches,
+)
 from ..audio.segments import SegmentManager
 from ..config import WEB_DIR
 from ..state import AppState
 
 
 router = APIRouter()
+
+
+class AvatarSelectRequest(BaseModel):
+    avatar_id: str | None = None
 
 
 def _state(request: Request) -> AppState:
@@ -64,6 +75,10 @@ async def status(request: Request) -> dict[str, Any]:
         "error": state.service.error,
         "accepting_streams": state.service.accepting_streams,
         "avatar_id": state.model.avatar_id,
+        "default_avatar_id": state.model.default_avatar_id,
+        "avatar_revision": state.model.avatar_revision,
+        "avatar_ready": state.model.avatar_ready,
+        "avatar_switching": state.model.avatar_switching,
         "fps": state.model.fps,
         "batch_size": args.batch_size if args else state.model.batch_size,
         "prebuffer": state.model.prebuffer,
@@ -126,6 +141,66 @@ async def status(request: Request) -> dict[str, Any]:
             else None
         ),
         "exit_reason": state.service.exit_reason or None,
+    }
+
+
+@router.get("/api/avatars")
+async def avatars(request: Request) -> dict[str, Any]:
+    state = _state(request)
+    if state.args is None:
+        raise HTTPException(status_code=503, detail="Service not configured")
+    caches = await asyncio.to_thread(
+        list_avatar_caches,
+        state.args.version,
+        state.model.default_avatar_id,
+    )
+    return {
+        "default_avatar_id": state.model.default_avatar_id,
+        "active_avatar_id": state.model.avatar_id,
+        "avatar_revision": state.model.avatar_revision,
+        "avatar_ready": state.model.avatar_ready,
+        "avatar_switching": state.model.avatar_switching,
+        "avatars": [cache.to_dict() for cache in caches],
+    }
+
+
+@router.get("/api/avatar")
+async def current_avatar(request: Request) -> dict[str, Any]:
+    state = _state(request)
+    return {
+        "avatar_id": state.model.avatar_id,
+        "default_avatar_id": state.model.default_avatar_id,
+        "avatar_revision": state.model.avatar_revision,
+        "avatar_ready": state.model.avatar_ready,
+        "avatar_switching": state.model.avatar_switching,
+        "width": state.model.width,
+        "height": state.model.height,
+    }
+
+
+@router.post("/api/avatar/select")
+async def select_avatar(
+    request: Request,
+    payload: AvatarSelectRequest | None = Body(default=None),
+) -> dict[str, Any]:
+    state = _state(request)
+    try:
+        info = await asyncio.to_thread(
+            activate_avatar,
+            state,
+            payload.avatar_id if payload is not None else None,
+        )
+    except AvatarError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return {
+        "success": True,
+        **info.to_dict(),
+        "default_avatar_id": state.model.default_avatar_id,
+        "active_avatar_id": state.model.avatar_id,
+        "avatar_revision": state.model.avatar_revision,
     }
 
 

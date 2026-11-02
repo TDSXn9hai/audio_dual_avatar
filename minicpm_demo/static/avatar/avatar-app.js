@@ -36,6 +36,23 @@ let interruptor = null;
 let modelSpeaking = false;
 let awaitingListen = false;
 let interruptRecoveryTimer = null;
+let avatarVoiceRef = null;
+
+async function loadAvatarVoiceRef() {
+    if (avatarVoiceRef?.base64) return avatarVoiceRef;
+    const response = await fetch('/api/avatar_ref_audio', {
+        signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) {
+        throw new Error('默认声线参考加载失败');
+    }
+    const data = await response.json();
+    if (!data?.base64) {
+        throw new Error('默认声线参考为空');
+    }
+    avatarVoiceRef = data;
+    return data;
+}
 
 function hint(text, error = false) {
     $('sessionHint').textContent = text;
@@ -354,6 +371,23 @@ async function start() {
         updateControls();
     };
     try {
+        const [avatarResponse, voiceRef] = await Promise.all([
+            fetch('/avatar-live/api/avatar/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}',
+            }),
+            loadAvatarVoiceRef(),
+        ]);
+        if (!avatarResponse.ok) {
+            let message = '数字人形象准备失败';
+            try {
+                const detail = await avatarResponse.json();
+                message = detail?.detail?.message || detail?.message || message;
+            } catch { /* keep generic message */ }
+            throw new Error(message);
+        }
+        if (currentAttempt !== attempt) return;
         player = new AvatarPlayer({
             canvas: $('avatarCanvas'),
             statusEl: $('avatarStatus'),
@@ -391,7 +425,12 @@ async function start() {
             : `Streaming Audio Conversation. ${customPrompt || DEFAULT_PROMPT}`;
         await owner.start(
             prompt,
-            { config: { length_penalty: 1.1 }, use_tts: true },
+            {
+                config: { length_penalty: 1.1 },
+                use_tts: true,
+                ref_audio_base64: voiceRef.base64,
+                tts_ref_audio_base64: voiceRef.base64,
+            },
             () => {
                 if (currentAttempt !== attempt) throw new Error('已取消连接');
                 capture.start();

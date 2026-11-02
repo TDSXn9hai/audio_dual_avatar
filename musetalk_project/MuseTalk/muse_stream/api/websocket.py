@@ -46,6 +46,7 @@ class LiveStreamSession:
         await self.websocket.accept()
         if (
             not state.service.ready
+            or not state.model.avatar_ready
             or state.model.avatar is None
             or state.model.runtime is None
         ):
@@ -55,6 +56,11 @@ class LiveStreamSession:
                     "message": "服务尚未就绪",
                     "status": state.service.status,
                     "detail": state.service.error,
+                    "code": (
+                        "avatar_switching"
+                        if state.model.avatar_switching
+                        else "avatar_unavailable"
+                    ),
                 }
             )
             await self.websocket.close(code=1013)
@@ -81,8 +87,33 @@ class LiveStreamSession:
             await self.websocket.close(code=1013)
             return
 
-        async with state.viewer.stream_lock:
-            await self._run_session()
+        with state.model.avatar_admission_lock:
+            avatar_available = (
+                state.model.avatar_ready
+                and not state.model.avatar_switching
+            )
+            if avatar_available:
+                state.model.avatar_leases += 1
+        if not avatar_available:
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "avatar_switching",
+                    "message": "数字人形象正在切换，请稍后重试",
+                }
+            )
+            await self.websocket.close(code=1013)
+            return
+
+        try:
+            async with state.viewer.stream_lock:
+                await self._run_session()
+        finally:
+            with state.model.avatar_admission_lock:
+                state.model.avatar_leases = max(
+                    0,
+                    state.model.avatar_leases - 1,
+                )
 
     async def _run_session(self) -> None:
         state = self.state

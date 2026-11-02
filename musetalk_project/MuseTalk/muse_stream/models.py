@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,14 @@ from typing import Any
 from .config import ROOT
 from .domain import Runtime
 from .log import log
+
+
+_REQUIRED_CACHE_FILES = (
+    "latents.pt",
+    "coords.pkl",
+    "mask_coords.pkl",
+    "avator_info.json",
+)
 
 
 def cache_dir_for(avatar_id: str, version: str) -> Path:
@@ -118,32 +127,21 @@ def build_avatar(
     runtime: Runtime,
     avatar_id: str,
 ) -> Any:
-    import scripts.realtime_inference as rt
-
-    # Avatar.prepare_material() uses these module-level dependencies in the
-    # standalone realtime script. Inject the already-loaded streaming runtime
-    # instead of loading a second set of models.
-    rt.vae = runtime.vae
-    rt.args = Namespace(
-        version=args.version,
-        extra_margin=args.extra_margin,
-        parsing_mode=args.parsing_mode,
-        fps=args.fps,
-        batch_size=args.batch_size,
-        audio_padding_length_left=args.audio_padding_length_left,
-        audio_padding_length_right=args.audio_padding_length_right,
-        skip_save_images=True,
-    )
-    rt.fp = runtime.face_parser
+    _configure_avatar_runtime(args, runtime)
 
     video_path = args.video_path
     bbox_shift = 0 if args.version == "v15" else int(args.bbox_shift)
 
     cache_dir = cache_dir_for(avatar_id, args.version)
-    required = ["latents.pt", "coords.pkl", "mask_coords.pkl", "avator_info.json"]
-    cache_valid = all((cache_dir / name).exists() for name in required)
+    cache_valid = all(
+        (cache_dir / name).exists() for name in _REQUIRED_CACHE_FILES
+    )
     if cache_dir.exists() and not cache_valid:
-        missing = [name for name in required if not (cache_dir / name).exists()]
+        missing = [
+            name
+            for name in _REQUIRED_CACHE_FILES
+            if not (cache_dir / name).exists()
+        ]
         raise RuntimeError(
             f"Incomplete avatar cache at {cache_dir}; missing {missing}. "
             "Remove that directory or use another avatar id."
@@ -167,11 +165,82 @@ def build_avatar(
         raise ValueError("avatar.preparation must be auto/reuse (or true/false)")
 
     log(f"avatar cache: {cache_dir} (preparation={preparation})")
-    avatar = rt.Avatar(
+    return _instantiate_avatar(
+        args,
+        avatar_id=avatar_id,
+        video_path=video_path,
+        bbox_shift=bbox_shift,
+        preparation=preparation,
+    )
+
+
+def load_cached_avatar(
+    args: Namespace,
+    runtime: Runtime,
+    avatar_id: str,
+) -> Any:
+    """Load an existing avatar cache without accessing its source video."""
+    _configure_avatar_runtime(args, runtime)
+    cache_dir = cache_dir_for(avatar_id, args.version)
+    missing = [
+        name
+        for name in _REQUIRED_CACHE_FILES
+        if not (cache_dir / name).is_file()
+        or (cache_dir / name).stat().st_size == 0
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Incomplete avatar cache at {cache_dir}; missing {missing}"
+        )
+
+    with open(cache_dir / "avator_info.json", "r", encoding="utf-8") as stream:
+        avatar_info = json.load(stream)
+    video_path = str(avatar_info.get("video_path", ""))
+    bbox_shift = 0 if args.version == "v15" else int(args.bbox_shift)
+    log(f"loading cached avatar: {cache_dir}")
+    return _instantiate_avatar(
+        args,
+        avatar_id=avatar_id,
+        video_path=video_path,
+        bbox_shift=bbox_shift,
+        preparation=False,
+    )
+
+
+def _configure_avatar_runtime(args: Namespace, runtime: Runtime) -> None:
+    import scripts.realtime_inference as rt
+
+    # Avatar.prepare_material() uses these module-level dependencies in the
+    # standalone realtime script. Inject the already-loaded streaming runtime
+    # instead of loading a second set of models.
+    rt.vae = runtime.vae
+    rt.args = Namespace(
+        version=args.version,
+        extra_margin=args.extra_margin,
+        parsing_mode=args.parsing_mode,
+        fps=args.fps,
+        batch_size=args.batch_size,
+        audio_padding_length_left=args.audio_padding_length_left,
+        audio_padding_length_right=args.audio_padding_length_right,
+        skip_save_images=True,
+    )
+    rt.fp = runtime.face_parser
+
+
+def _instantiate_avatar(
+    args: Namespace,
+    *,
+    avatar_id: str,
+    video_path: str,
+    bbox_shift: int,
+    preparation: bool,
+) -> Any:
+    import scripts.realtime_inference as rt
+
+    return rt.Avatar(
         avatar_id=avatar_id,
         video_path=video_path,
         bbox_shift=bbox_shift,
         batch_size=args.batch_size,
         preparation=preparation,
     )
-    return avatar

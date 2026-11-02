@@ -85,6 +85,19 @@ class StreamAudioSession:
         """Sample index of a frame boundary on the stream timeline."""
         return int(round(frame * self.sample_rate / self.state.model.fps))
 
+    def _reserve_avatar_lease(self) -> bool:
+        model = self.state.model
+        with model.avatar_admission_lock:
+            if not model.avatar_ready or model.avatar_switching:
+                return False
+            model.avatar_leases += 1
+            return True
+
+    def _release_avatar_lease(self) -> None:
+        model = self.state.model
+        with model.avatar_admission_lock:
+            model.avatar_leases = max(0, model.avatar_leases - 1)
+
     def _next_window(self) -> tuple[int, int]:
         """Return (core_frames, core_bytes) of the next full window."""
         core_frames = (
@@ -125,6 +138,18 @@ class StreamAudioSession:
             )
             await self.websocket.close(code=1013)
             return False
+        if not state.model.avatar_ready:
+            await self._send_error(
+                "数字人形象正在切换，请稍后重试",
+                code=(
+                    "avatar_switching"
+                    if state.model.avatar_switching
+                    else "avatar_unavailable"
+                ),
+                status=state.service.status,
+            )
+            await self.websocket.close(code=1013)
+            return False
         if state.stream_input.lock.locked() or state.stream_input.connected:
             await self._send_error(
                 "已有音频上行连接",
@@ -138,76 +163,86 @@ class StreamAudioSession:
         state = self.state
         if not await self._admit():
             return
+        if not self._reserve_avatar_lease():
+            await self._send_error(
+                "数字人形象正在切换，请稍后重试",
+                code="avatar_switching",
+            )
+            await self.websocket.close(code=1013)
+            return
 
-        async with state.stream_input.lock:
-            state.stream_input.connected = True
-            state.stream_input.samples_received = 0
-            state.stream_input.windows_submitted = 0
-            state.stream_input.dropped_samples = 0
-            await self.websocket.send_json(
-                {
-                    "type": "audio_meta",
-                    "sample_rate": self.sample_rate,
-                    "channels": 1,
-                    "format": "s16le",
-                    "window_frames": self.window_frames,
-                    "first_window_frames": self.first_window_frames,
-                    "window_samples": self.window_samples,
-                    "window_ms": round(
-                        self.window_samples * 1000 / self.sample_rate,
-                        3,
-                    ),
-                    "context_left_ms": self.context_left_ms,
-                    "context_right_ms": self.context_right_ms,
-                    "context_left_frames": self.context_left_frames,
-                    "context_right_frames": self.context_right_frames,
-                    "overlap_frames": self.overlap_frames,
-                    "pause_overlap_frames": self.pause_overlap_frames,
-                    "pause_boundary_frames": int(
-                        getattr(
-                            self.args,
-                            "stream_pause_boundary_frames",
-                            0,
-                        )
-                    ),
-                    "max_pending_windows": (
-                        self.args.stream_max_pending_windows
-                    ),
-                }
-            )
-            log(
-                f"audio stream connected: window_frames="
-                f"{self.first_window_frames}/{self.window_frames} "
-                f"window_samples={self.window_samples} "
-                f"context_frames={self.context_left_frames}/"
-                f"{self.context_right_frames} "
-                f"overlap={self.overlap_frames}/"
-                f"{self.pause_overlap_frames}"
-            )
-            try:
-                await self._receive_loop()
-            finally:
-                if self.cancelled:
-                    dropped = len(self.buffer) // 2
-                    self.state.stream_input.dropped_samples += dropped
-                    self.buffer.clear()
-                    log(
-                        "audio stream cancelled: "
-                        f"dropped_buffered_samples={dropped}"
-                    )
-                else:
-                    await self._flush(final=True)
-                # Whatever ended this upstream, its last window closes the
-                # answer: the inference worker stops holding frames after it.
-                if self.last_segment is not None:
-                    self.last_segment.is_final = True
-                state.stream_input.connected = False
-                log(
-                    "audio stream disconnected: "
-                    f"samples={state.stream_input.samples_received} "
-                    f"windows={state.stream_input.windows_submitted} "
-                    f"dropped={state.stream_input.dropped_samples}"
+        try:
+            async with state.stream_input.lock:
+                state.stream_input.connected = True
+                state.stream_input.samples_received = 0
+                state.stream_input.windows_submitted = 0
+                state.stream_input.dropped_samples = 0
+                await self.websocket.send_json(
+                    {
+                        "type": "audio_meta",
+                        "sample_rate": self.sample_rate,
+                        "channels": 1,
+                        "format": "s16le",
+                        "window_frames": self.window_frames,
+                        "first_window_frames": self.first_window_frames,
+                        "window_samples": self.window_samples,
+                        "window_ms": round(
+                            self.window_samples * 1000 / self.sample_rate,
+                            3,
+                        ),
+                        "context_left_ms": self.context_left_ms,
+                        "context_right_ms": self.context_right_ms,
+                        "context_left_frames": self.context_left_frames,
+                        "context_right_frames": self.context_right_frames,
+                        "overlap_frames": self.overlap_frames,
+                        "pause_overlap_frames": self.pause_overlap_frames,
+                        "pause_boundary_frames": int(
+                            getattr(
+                                self.args,
+                                "stream_pause_boundary_frames",
+                                0,
+                            )
+                        ),
+                        "max_pending_windows": (
+                            self.args.stream_max_pending_windows
+                        ),
+                    }
                 )
+                log(
+                    f"audio stream connected: window_frames="
+                    f"{self.first_window_frames}/{self.window_frames} "
+                    f"window_samples={self.window_samples} "
+                    f"context_frames={self.context_left_frames}/"
+                    f"{self.context_right_frames} "
+                    f"overlap={self.overlap_frames}/"
+                    f"{self.pause_overlap_frames}"
+                )
+                try:
+                    await self._receive_loop()
+                finally:
+                    if self.cancelled:
+                        dropped = len(self.buffer) // 2
+                        self.state.stream_input.dropped_samples += dropped
+                        self.buffer.clear()
+                        log(
+                            "audio stream cancelled: "
+                            f"dropped_buffered_samples={dropped}"
+                        )
+                    else:
+                        await self._flush(final=True)
+                    # Whatever ended this upstream, its last window closes the
+                    # answer: the inference worker stops holding frames after it.
+                    if self.last_segment is not None:
+                        self.last_segment.is_final = True
+                    state.stream_input.connected = False
+                    log(
+                        "audio stream disconnected: "
+                        f"samples={state.stream_input.samples_received} "
+                        f"windows={state.stream_input.windows_submitted} "
+                        f"dropped={state.stream_input.dropped_samples}"
+                    )
+        finally:
+            self._release_avatar_lease()
 
     async def _receive_loop(self) -> None:
         while not self.state.service.exit_requested:

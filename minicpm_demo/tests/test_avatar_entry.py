@@ -1,5 +1,6 @@
 """Lightweight contracts for the digital-human entry and frame codec."""
 
+import json
 from pathlib import Path
 import sys
 
@@ -86,3 +87,21 @@ def test_avatar_default_prompt_is_chinese_knowledge_sharing():
     page = (DEMO_ROOT / "static" / "avatar" / "avatar.html").read_text()
     assert "中文知识传播助手" in app
     assert "中文知识传播助手" in page
+
+
+def test_avatar_only_voice_reference_is_wired_without_changing_omni_default():
+    config = json.loads((DEMO_ROOT / "config.json").read_text())
+    assert (
+        config["audio"]["ref_audio_path"]
+        == "assets/ref_audio/ref_minicpm_signature.wav"
+    )
+    assert (
+        config["audio"]["avatar_ref_audio_path"]
+        == "assets/ref_audio/ref_avatar_default.wav"
+    )
+    assert (DEMO_ROOT / config["audio"]["avatar_ref_audio_path"]).is_file()
+
+    app = (DEMO_ROOT / "static" / "avatar" / "avatar-app.js").read_text()
+    assert "/api/avatar_ref_audio" in app
+    assert "ref_audio_base64: voiceRef.base64" in app
+    assert "tts_ref_audio_base64: voiceRef.base64" in app

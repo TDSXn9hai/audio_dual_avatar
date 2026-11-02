@@ -50,6 +50,38 @@ MUSETALK_CONFIG=configs/streaming_duplex.yaml ./start_avatar.sh start
 The cache is generated under
 `musetalk_project/MuseTalk/results/v15/avatars/knowledge_host_720p/`.
 
+### Select a preprocessed avatar through the API
+
+The gateway can switch between complete local avatar caches before a live
+session starts. With no `avatar_id`, the cache configured by
+`configs/streaming_duplex_knowledge.yaml` remains the default.
+
+```bash
+# List complete and invalid local caches.
+curl -k https://127.0.0.1:8006/avatar-live/api/avatars
+
+# Select the bundled fallback avatar.
+curl -k -X POST https://127.0.0.1:8006/avatar-live/api/avatar/select \
+  -H 'Content-Type: application/json' \
+  -d '{"avatar_id":"musetalk_test_avatar"}'
+
+# Restore the config default.
+curl -k -X POST https://127.0.0.1:8006/avatar-live/api/avatar/select \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+Call the selection endpoint before connecting `/avatar-live/ws/live`. Switching
+is rejected while a viewer, audio upstream or active inference task exists.
+Error responses include `detail.code` and `detail.message`; current codes are
+`avatar_not_found`, `avatar_invalid`, `avatar_busy`, `avatar_switching`,
+`avatar_unavailable` and `avatar_activation_failed`.
+
+`/avatar` also uses its own default voice reference from
+`assets/ref_audio/ref_avatar_default.wav`, configured as
+`audio.avatar_ref_audio_path`. The `/omni` page and its presets continue to use
+the original global `audio.ref_audio_path`.
+
 ## Layout
 
 - `minicpm_demo/` — MiniCPM-o 4.5 full-duplex demo (gateway, worker, backend, web UI) with the avatar bridge and the `/avatar` page
