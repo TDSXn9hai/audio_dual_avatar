@@ -11,8 +11,15 @@ import numpy as np
 import pytest
 
 from muse_stream.domain import LiveSegment
+from muse_stream.api.websocket import LiveStreamSession
 from muse_stream.inference import workers
-from muse_stream.protocol import FRAME_HEADER, FRAME_SILENT
+from muse_stream.protocol import (
+    FRAME_HEADER,
+    FRAME_SILENT,
+    H264_FRAME_HEADER,
+    H264_FRAME_MAGIC,
+    VIDEO_FLAG_KEYFRAME,
+)
 from muse_stream.state import AppState
 
 
@@ -140,3 +147,102 @@ def test_parallel_encoding_preserves_frame_and_control_order(monkeypatch) -> Non
         loop_thread.close()
 
     assert not encoder_thread.is_alive()
+
+
+def test_h264_encoding_preserves_packets_and_keyframe_flags(monkeypatch) -> None:
+    monkeypatch.setenv("AVATAR_STREAM_FORMAT", "h264")
+    monkeypatch.setenv("AVATAR_H264_GOP", "6")
+
+    loop_thread = EventLoopThread()
+    raw_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    network_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    stop = threading.Event()
+    state = AppState(
+        args=Namespace(jpeg_quality=88, fps=24),
+    )
+    state.model.width = 128
+    state.model.height = 128
+    segment = LiveSegment(
+        id=9,
+        source_path=None,
+        wav_path=None,
+        duration=0.5,
+        total_frames=12,
+        global_start_frame=0,
+        speech_frames=12,
+    )
+    encoder_thread = threading.Thread(
+        target=workers.live_encode_worker,
+        args=(
+            state,
+            raw_queue,
+            network_queue,
+            loop_thread.loop,
+            stop,
+        ),
+        kwargs={"stream_format": "h264"},
+        daemon=True,
+    )
+
+    try:
+        encoder_thread.start()
+        loop_thread.submit(raw_queue.put(("segment", segment))).result(timeout=2)
+        frame_indices = list(range(12))
+        for index in frame_indices:
+            frame = np.full((128, 128, 3), index * 15, dtype=np.uint8)
+            loop_thread.submit(
+                raw_queue.put(
+                    (
+                        "raw",
+                        FRAME_SILENT,
+                        segment.id,
+                        index * 41667,
+                        index,
+                        frame,
+                    )
+                )
+            ).result(timeout=2)
+        loop_thread.submit(
+            raw_queue.put(("segment_end", segment.id))
+        ).result(timeout=2)
+
+        received = []
+        while True:
+            item = loop_thread.submit(network_queue.get()).result(timeout=10)
+            received.append(item)
+            if item[0] == "segment_end":
+                break
+            if item[0] == "error":
+                pytest.fail(item[1])
+
+        packets = received[1:-1]
+        assert len(packets) == len(frame_indices)
+        assert [item[4] for item in packets] == frame_indices
+        decoded_headers = [
+            H264_FRAME_HEADER.unpack_from(item[5])
+            for item in packets
+        ]
+        assert all(header[0] == H264_FRAME_MAGIC for header in decoded_headers)
+        assert decoded_headers[0][3] & VIDEO_FLAG_KEYFRAME
+        assert decoded_headers[6][3] & VIDEO_FLAG_KEYFRAME
+    finally:
+        stop.set()
+        encoder_thread.join(timeout=10)
+        loop_thread.close()
+
+    assert not encoder_thread.is_alive()
+
+
+def test_live_session_selects_codec_from_viewer_query() -> None:
+    state = AppState()
+    session = LiveStreamSession(
+        state,
+        SimpleNamespace(query_params={"video_codec": "webp"}),
+    )
+    assert session.stream_format == "webp"
+
+    session = LiveStreamSession(
+        state,
+        SimpleNamespace(query_params={"video_codec": "h264"}),
+    )
+    assert session.stream_format == "h264"

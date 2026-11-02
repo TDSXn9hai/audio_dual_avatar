@@ -263,7 +263,7 @@ f2581f07ba04bd0b0130356c05b72eb6cda772aab8a8c61321468c0968dc225e  ./gateway_modu
 80fd00e0d3fa5b552bc6318135706505e8e894af5b349c585a769c8248757264  ./gateway_modules/ref_audio_registry.py
 ac1dbdd39d479c55c2cd055456c297de82b9fce66b197a440a670b0d5b77139c  ./gateway_modules/session_recording.py
 9ed5a31f0a909e947316ba8fd3ae609bdfe63f8a4a24033a1776f38c1b024657  ./gateway_modules/worker_pool.py
-42505986497857d5e5efad957d7a11fd7e3a6493fbe85806542242cd9d186481  ./gateway.py
+18be5d66193a1756064a178bd6140aadf8fd0464f7baeab4b6cdc5e7fa25e527  ./gateway.py
 917079a5e0349a4ae2e1925b8391f8b211316477b88b8980a311fdaa627dae23  ./.gitignore
 9ab9db55c0c95e649e4cf5104ff195f2d28ea239b20ab9618739395c8b1d6200  ./install.sh
 34d823f7a691ddec4816ac5dfe5fc487963e3d75ab3be374590c02fc0a7fa3f5  ./MiniCPMO45/added_tokens.json
@@ -339,11 +339,11 @@ f1d00d4182aa15a9b7d5af829e0c0f17a2c19ded7c4d37ad951e82d6f4ffa3bc  ./session_clea
 58eff374d606bc8798fb7068085bd2946ec9eaa8a899ceb10131b7a98f445574  ./start_all.sh
 2241e74093c87ff134fcb719a7a090d47358ad968567e3d2110bf9b99f417a34  ./static/admin.html
 c82dcbdfc57318a05935bdce5a4c9077fbe50edb4a70174648a760fe06852a98  ./static/assets/minicpm-o-45-framework.png
-2775b415162a6757c1cb8181521087936e466cda67e78c4d01b8c08812e45537  ./static/avatar/avatar-app.js
-442ce75203c5a4ee1568c38f5982f0d5dfc636f88a78fb5dda36d0efa3f1f1db  ./static/avatar/avatar-player.js
+58acc50c26bdbf3f026af99ef50beaa37ac2b2c3a1623f8b81b9191e6a7338ed  ./static/avatar/avatar-app.js
+93d687c95fdc440a82a398f2b984a6527595c6dc8cf2d9065265dc0cd0e5fa04  ./static/avatar/avatar-player.js
 ec2f0a19a376aa3ea866ceabade218acd710ce4bf045b0ca279529895020e055  ./static/avatar/avatar-poster.jpg
 f8b60dfaac052a79f88f22190ed2427a70acb6abce7eac0629e61cfb33e0a141  ./static/avatar/avatar.css
-cfdabdf2be85f6adf37ec32242c73a5f3ac9487574eb1c091c8a87501bc22a0a  ./static/avatar/avatar.html
+6fd2d904621b2edecaa0fac91ec0318707adf804e2cddad276c95f8cc26a5f13  ./static/avatar/avatar.html
 8ff46e9817a2c824b91c8724b50e8e08c4faa276c0bc5052199b54952f775afb  ./static/avatar/speech-interruptor.js
 8f28b2d72c6eea937e6680ed4935e381530176b4250cabdb94b36374d100998b  ./static/audio-duplex/audio-duplex-app.js
 49066bc22139e3957435df68f05eef8de89c7ceddf3f8fa2a298a2e2ac0d6a63  ./static/audio-duplex/audio-duplex.css
@@ -386,9 +386,9 @@ e23be568b1ba138157c4c25536927b4e609d75311309711d4e648c49a7a87c60  ./static/mobil
 6459d367a26eaec1fa110d8bb9c16fb5ce5e1c84de56b1732ad7057c0f1fd1c2  ./static/mobile-omni/mobile-omni.css
 4582d083cc34b87faa2657293cd5bb2cf2c98f7760ec8c2eaf3f86f84f19f320  ./static/mobile-omni/settings-widget.css
 44754d759b9cdd0c645114cd3836bf2d333ac8502cfb7d481254cb33ee4d7280  ./static/mobile-omni/settings-widget.js
-a62b2fb6cd881cab165dc8b64aa49bb962b707a5ee784e5e83263e19b854b890  ./static/omni/omni-app.js
+6fc7522707f2dce8fe140e3b3ac137be71c0094d6fbed8eabd6ffe1742d657e8  ./static/omni/omni-app.js
 2b1e3264dd5379fb9e86f145755915c08735ec02b04b6bb54393184f5335cced  ./static/omni/omni.css
-f3855ef9e5cfb24d07cb6f4323716eac2b641465d2684d332deecce9bf99fd75  ./static/omni/omni.html
+d85360b576afc13bacd883a130dac833c2bc6d0801bc6aae03bbabce9244847e  ./static/omni/omni.html
 af3eaa491a0a56b54770b1defeb851375adc58ddbeb545d103fe4651bc2421ba  ./static/prototype-content-editor.html
 381b3a6a7b87dcd268de83417454f25b066b876f66f5e16b2e18c1b4c999f096  ./static/realtime/realtime-app.js
 7bbe37f4b4617d1a3215e4ac28cea6d7e05c6e580c4b5d4dd7fe3f29c7de3ca4  ./static/realtime/realtime.css
@@ -445,7 +445,7 @@ e2db6def09bb73423a5e7f5d667c81821b0c505f675644554d7e86768317d3eb  ./tests/js/que
 6ac493a5aae8d382a4813791abba3600bc1179408759f3d0a123dcba21af9716  ./tests/official_demo_followup_interrupt_test.py
 46a94e1dca44e461d27d0c1bd27bac8ed2c7a5c68c727ce681d3855574ea6fdc  ./tests/run_all_tests.sh
 19aaaaa8c0dd60e2ff3ad778916dfabec29a617b04bd4c9e70065336196f2846  ./tests/test_api.py
-84372aa93ffdde152982e15bc501c071013d3dc8e1a925c457b044c9cc6595e8  ./tests/test_avatar_entry.py
+f2c776d8a2fee9382b987043736ab87629036d9ffa9a53c2bb9fde09e66c4be7  ./tests/test_avatar_entry.py
 aeb72a8d1acb99cfd4ad88b0d0f1afda67970857a5492e34b0147969695a13f5  ./tests/test_chat.py
 dc7c6a80109bd1b8708a20bfadf7e2d2502327490a42aa8f79c7093475b9c371  ./tests/test_compile_bench.py
 bd92c26782c963294759d4f117e387cb23e993d4fa24430397c1168c84ae0a00  ./tests/test_compile_switch.py

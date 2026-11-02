@@ -7,7 +7,7 @@
 ```
 浏览器 https://<host>:8006/avatar（第一入口，纯音频数字人）
 或 https://<host>:8006/omni（第二入口，完整 Omni 页面）
-  │  麦克风 PCM (16k f32, 1s/块) [+ 摄像头 JPEG，可选]          ▲ 数字人 JPEG 帧 + 分段 WAV
+  │  麦克风 PCM (16k f32, 1s/块) [+ 摄像头 JPEG，可选]          ▲ H.264/WebP 帧 + 分段 WAV
   ▼                                                              │ (同源代理 /avatar-live/*)
 gateway.py :8006 ──► worker :22400 ──► py_backend :22500 (MiniCPM-o, GPU0)
   │  下行 response.output.delta(audio/listen) 原样旁路复制        │
@@ -165,9 +165,15 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 
 ### 5.2 数字人播放器（`static/avatar/avatar-player.js`，`AvatarPlayer`）
 
-- 从 MuseTalk `web/app.js` 移植 `/ws/live` 客户端：解析 24 字节帧头（`MTF1`、kind、segment id、pts_us、frame index）、按 `segment` 消息拉取并解码 WAV、ACK 回传播放进度、处理 `flush`。
-- 默认接收 WebP 帧（同时兼容 JPEG）；MuseTalk worker 通过 `AVATAR_STREAM_FORMAT=webp` 编码。保持本地现有 480×864、`prebuffer: 32`、客户端 8 帧起播和 4 秒 prefetch 参数。
-- WebP 编码使用独立线程池，`AVATAR_ENCODE_THREADS` 默认 4。编码结果按 `frame_index` 严格重排后写入网络队列，避免多线程乱序破坏 ACK 和播放时间轴。本机 768×1344、quality 88 的编码基准约为：1 线程 10 FPS、2 线程 20 FPS、4 线程 39 FPS、8 线程 79 FPS；4 线程已高于 24 FPS 播放需求。
+- 从 MuseTalk `web/app.js` 移植 `/ws/live` 客户端：解析 24 字节帧头、按 `segment` 消息拉取并解码 WAV、ACK 回传播放进度、处理 `flush`。
+- 默认使用 H.264：MuseTalk 通过 ffmpeg/libx264 将合成帧编码为 Annex-B Access Unit，每条 WebSocket binary message 使用 `MTH1` 头携带 kind、关键帧标志、segment id、pts_us 和 frame index。
+- `/avatar` 播放器用 WebCodecs `VideoDecoder` 解码 `EncodedVideoChunk`，将输出的 `VideoFrame` 按 PTS 对齐原有音频主时钟后绘制到 Canvas。
+- 客户端建连时通过 `/ws/live?video_codec=h264` 或 `?video_codec=webp` 选择编码。没有 `VideoDecoder`、配置失败或解码失败时自动回退 WebP。
+- H.264 默认目标码率 2 Mbps、最大 3 Mbps、每 120 帧一个周期 IDR；`flush` 时服务端重启编码器并立即产生新 IDR，客户端 reset 解码器后从该关键帧恢复。
+- H.264 是有状态编码，不能像 WebP 一样任意丢帧后直接恢复；hold 帧会重新编码上一张合成图，打断恢复依赖周期关键帧。
+- 初版使用 3–4 Mbps、`superfast`、每 12 帧 IDR，周期 IDR 在 720p 上造成约 200–300 ms 编码停顿；实测有效媒体帧仅约 15.6 FPS。调整为 2–3 Mbps、`ultrafast`、每 120 帧 IDR，并在 `flush` 时重启编码器后，有效媒体帧恢复到约 26.3 FPS，帧间隔 p95 约 44.6 ms。
+- WebP 回退仍使用独立线程池，`AVATAR_ENCODE_THREADS` 默认 4。编码结果按 `frame_index` 严格重排后写入网络队列，避免多线程乱序破坏 ACK 和播放时间轴。
+- MuseTalk 自带调试页和 `headless_live_viewer.py` 显式请求 `video_codec=webp`，避免与 H.264 播放器改造互相影响。
 - 在 Start 点击时创建 AudioContext 并连接（满足浏览器自动播放限制，也保证模型开口前 viewer 已连上，MuseTalk 只在有 viewer 时渲染）。断开后每 3 秒自动重连。
 - **音视频同步（音频为主时钟）**：
   - 每个窗口收到 8 帧（`CLIENT_PREBUFFER_FRAMES`）且音频解码完成后才排上播放。
@@ -200,13 +206,14 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 - `minicpm_demo/static/avatar/avatar.html`、`avatar.css`、`avatar-app.js`、`avatar-poster.jpg`、`speech-interruptor.js`
 - `minicpm_demo/static/avatar/avatar-player.js`
 - `musetalk_project/MuseTalk/muse_stream/audio/minicpm.py`
+- `musetalk_project/MuseTalk/muse_stream/inference/h264.py`
 - `musetalk_project/MuseTalk/configs/streaming_duplex_knowledge.yaml`（默认）
 - `musetalk_project/MuseTalk/configs/streaming_duplex.yaml`（原形象备用）
 
 修改：
 
 - MiniCPM 侧：`gateway.py`、`static/omni/omni.html`、`static/omni/omni.css`、`static/omni/omni-app.js`、`static/duplex/lib/audio-player.js`
-- MuseTalk 侧：`muse_stream/api/audio_websocket.py`、`muse_stream/api/websocket.py`、`muse_stream/audio/segments.py`、`muse_stream/audio/stream.py`、`muse_stream/config.py`、`muse_stream/inference/workers.py`、`muse_stream/state.py`、`web/app.js`、`musetalk/utils/face_parsing/resnet.py`、`scripts/realtime_inference.py`
+- MuseTalk 侧：`muse_stream/api/audio_websocket.py`、`muse_stream/api/websocket.py`、`muse_stream/audio/segments.py`、`muse_stream/audio/stream.py`、`muse_stream/config.py`、`muse_stream/inference/workers.py`、`muse_stream/protocol.py`、`muse_stream/state.py`、`web/app.js`、`musetalk/utils/face_parsing/resnet.py`、`scripts/realtime_inference.py`
 - `musetalk_project/headless_live_viewer.py`
 
 ## 7. 验证记录
@@ -224,17 +231,21 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 | 双卡启动 | MiniCPM-o 在 GPU 0、MuseTalk 在 GPU 1 启动并通过健康检查 |
 | 直连 WebP 流 | `/ws/audio → /ws/live` 前 12 帧全部为 WebP，0 帧 JPEG |
 | gateway WSS 代理 | `/avatar-live/ws/live` 前 4 帧全部为 WebP |
+| 直连 H.264 流 | `/ws/live?video_codec=h264` 返回 `MTH1`，24 帧序号连续，IDR 位于 0/12，ffmpeg 解码成功 |
+| Gateway H.264 代理 | `/avatar-live/ws/live?video_codec=h264` 返回 `MTH1`，`codec_string=avc1.4D4028` |
+| H.264 持续流 | 2M/ultrafast/GOP120 下 8 秒实测约 26.3 fps、2.58 Mbps（含 24 字节帧头） |
+| H.264 自动回退 | `video_codec=webp` 仍返回 `MTF1` + WebP |
 | 自动打断超时合同 | 2500ms watchdog 已覆盖播放器丢弃态和页面等待态 |
-| JS 语法 | esprima 检查通过（机器上无 node，也无浏览器） |
+| JS 语法 | `avatar-player.js` 通过 esprima 兼容转换检查；机器上无浏览器，WebCodecs 运行待实测 |
 
-未在浏览器中实际验证：页面显示效果、布局、浏览器回声消除效果、`/avatar` 页面的实际音画同步（"第一句音频晚于视频"已由用户确认修复）。
+未在浏览器中实际验证：WebCodecs 实际解码、H.264 画质、页面显示效果、布局、浏览器回声消除效果和 `/avatar` 页面的实际音画同步（"第一句音频晚于视频"已由用户确认修复）。
 
 ## 8. 已知问题与后续方向
 
-1. **画面滞后于音频（已分析，未修改）**：每个窗口只在开始时对齐一次，窗口内后续帧到得晚就会落后于声音。主要可能原因是带宽：480×864、JPEG q88 约 61KB/帧，24fps 约 12 Mbit/s，经 MuseTalk → gateway → 浏览器两段有序 WebSocket；音频是单独的小 WAV，不受影响。其他原因：两服务共卡时渲染偶尔慢于实时、客户端 8 帧即起播。建议方向：
+1. **画面滞后于音频**：每个窗口只在开始时对齐一次，窗口内后续帧到得晚就会落后于声音。历史 WebP/JPEG 路径的带宽约为 12–16 Mbit/s，经 MuseTalk → gateway → 浏览器两段有序 WebSocket；音频是单独的小 WAV，不受影响。当前默认 H.264 已将目标带宽降至约 3–4 Mbit/s，但仍需在真实浏览器中验证是否彻底消除滞后。其他原因包括两服务共卡时渲染偶尔慢于实时、客户端 8 帧即起播。后续方向：
    - 加偏差监测（每帧到达时间 − 应显示时间）；
    - 检测到迟到时，下一窗等全部帧到齐再起播，用时间轴后移在窗口边界纠正（偏差限制在 1 秒内，代价是卡顿时声音在窗口间短暂停顿）；
-   - JPEG 质量降到 75（约 41KB/帧、8 Mbit/s）；进一步可做自适应码率、只传嘴部区域，或改用 WebRTC/H.264（约 1–2 Mbit/s）。
+   - H.264 默认目标已经降至约 3–4 Mbit/s；进一步可做自适应码率、只传嘴部区域，或迁到 WebRTC。
 2. **管线延迟**：从 MiniCPM-o 第一块音频到出画面约 1.3–1.6 秒（起播缓冲 32 帧 + 渲染）。被打断时，模型认为"已说出"的内容比用户实际听到的多约 1 秒以上，目前无法从协议层修正。
 3. **单观看端**：MuseTalk 同一时间只支持一个 viewer；同时打开 `http://<host>:8000/` 调试页时，`/avatar` 会显示错误并不断重连。也只支持一个上游会话，与 MiniCPM-o 单 backend 单会话 1:1 配对。
 4. **回声消除未测**：数字人声音经 WebAudio 播放，与原 Omni 页面相同机制，但不戴耳机插话的效果未实测。

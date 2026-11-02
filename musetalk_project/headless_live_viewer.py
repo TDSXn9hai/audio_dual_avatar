@@ -161,7 +161,7 @@ async def main() -> int:
     parser.add_argument("simulator_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
-    viewer = Viewer(f"ws://{args.base}/ws/live")
+    viewer = Viewer(f"ws://{args.base}/ws/live?video_codec=webp")
     # The simulator only needs the server to be ready; wait for that first.
     import urllib.request
     while True:

@@ -82,6 +82,32 @@ Error responses include `detail.code` and `detail.message`; current codes are
 `audio.avatar_ref_audio_path`. The `/omni` page and its presets continue to use
 the original global `audio.ref_audio_path`.
 
+### H.264 avatar stream
+
+The live viewer now defaults to H.264 Annex-B encoded by ffmpeg/libx264. The
+browser decodes it with WebCodecs and the existing audio-master clock still
+drives Canvas rendering:
+
+```text
+ws://<host>:8000/ws/live?video_codec=h264
+```
+
+The gateway forwards the same query:
+
+```text
+wss://<host>:8006/avatar-live/ws/live?video_codec=h264
+```
+
+Clients without `VideoDecoder` support can request the previous image path with
+`video_codec=webp`. The built-in MuseTalk debug viewer and headless viewer
+explicitly use WebP. H.264 defaults are `2M` target / `3M` maximum bitrate and
+an IDR every 120 frames; `flush` restarts the encoder to force an immediate
+IDR. These can be adjusted with the `AVATAR_H264_*`
+variables in `.avatar-env`. See
+[PLATFORM_INTEGRATION_GUIDE.md](PLATFORM_INTEGRATION_GUIDE.md) for the `MTH1`
+packet contract and WebCodecs recovery rules. `install.sh` verifies that the
+configured ffmpeg build provides `libx264`.
+
 ## Layout
 
 - `minicpm_demo/` — MiniCPM-o 4.5 full-duplex demo (gateway, worker, backend, web UI) with the avatar bridge and the `/avatar` page

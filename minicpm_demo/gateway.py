@@ -1450,6 +1450,8 @@ async def avatar_live_ws(ws: WebSocket):
     await ws.accept()
     import websockets
     target = "ws" + base[len("http"):] + "/ws/live"
+    if ws.url.query:
+        target += f"?{ws.url.query}"
     try:
         upstream = await websockets.connect(target, open_timeout=5, max_size=None)
     except Exception as exc:

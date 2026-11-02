@@ -22,9 +22,11 @@ from ..protocol import (
     FRAME_SILENT,
     IDLE_SEGMENT_ID,
     frame_pts_us,
+    pack_h264_frame,
     pack_frame,
 )
 from ..state import AppState
+from .h264 import EncodedH264Frame, H264Encoder
 from .pipeline import InferencePipeline
 
 # Raw-queue marker for "repeat the previous composite frame". It never goes
@@ -343,6 +345,7 @@ def live_encode_worker(
     network_queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
     stop: threading.Event,
+    stream_format: str | None = None,
 ) -> None:
     args = state.args
     assert args is not None
@@ -350,10 +353,16 @@ def live_encode_worker(
     count = 0
     started = time.monotonic()
     last_encoded: bytes | None = None
-    # WebP is the default avatar codec. JPEG remains a transparent fallback if
-    # the local OpenCV build was compiled without WebP support.
+    last_composite: np.ndarray | None = None
     stream_width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
-    use_webp = os.environ.get("AVATAR_STREAM_FORMAT", "webp").lower() == "webp"
+    if stream_width > 0:
+        stream_width -= stream_width % 2
+    selected_format = (
+        stream_format
+        or os.environ.get("AVATAR_STREAM_FORMAT", "h264")
+    ).lower()
+    use_h264 = selected_format in ("h264", "h264_annexb")
+    use_webp = not use_h264 and selected_format != "jpeg"
     extension = ".webp" if use_webp else ".jpg"
     quality_key = cv2.IMWRITE_WEBP_QUALITY if use_webp else cv2.IMWRITE_JPEG_QUALITY
     encode_threads_raw = os.environ.get("AVATAR_ENCODE_THREADS", "4") or "4"
@@ -372,6 +381,8 @@ def live_encode_worker(
         maxsize=max(8, encode_threads * 4),
     )
     sender_gone = threading.Event()
+    executor: concurrent.futures.ThreadPoolExecutor | None = None
+    h264_encoder: H264Encoder | None = None
 
     def encode_prepared(frame: np.ndarray) -> bytes | None:
         ok, encoded = cv2.imencode(
@@ -386,6 +397,17 @@ def live_encode_worker(
                 [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
             )
         return encoded.tobytes() if ok else None
+
+    def resize_for_stream(frame: np.ndarray) -> np.ndarray:
+        if stream_width > 0 and frame.shape[1] > stream_width:
+            height = round(frame.shape[0] * stream_width / frame.shape[1])
+            height -= height % 2
+            frame = cv2.resize(
+                frame,
+                (stream_width, height),
+                interpolation=cv2.INTER_AREA,
+            )
+        return frame
 
     def put_ordered(
         future: concurrent.futures.Future | None,
@@ -424,6 +446,12 @@ def live_encode_worker(
                     continue
 
                 _, frame_kind, segment_id, pts_us, frame_index = metadata[:5]
+                frame_flush_seq = metadata[-1]
+                with state.pipeline.lock:
+                    current_flush_seq = state.pipeline.flush_seq
+                if frame_flush_seq != current_flush_seq:
+                    continue
+                encoded: EncodedH264Frame | bytes | None = None
                 if item_type == "hold":
                     encoded_bytes = last_encoded
                     if encoded_bytes is None:
@@ -433,24 +461,39 @@ def live_encode_worker(
                 else:
                     assert future is not None
                     try:
-                        encoded_bytes = future.result()
+                        encoded = future.result()
                     except Exception:
                         log(traceback.format_exc())
                         continue
+                    if isinstance(encoded, EncodedH264Frame):
+                        encoded_bytes = encoded.data
+                    else:
+                        encoded_bytes = encoded
                 if encoded_bytes is None:
                     continue
                 with state.pipeline.lock:
                     canceled = segment_id in state.pipeline.canceled_ids
                 if canceled:
                     continue
-                last_encoded = encoded_bytes
-                packet = pack_frame(
-                    frame_kind,
-                    segment_id,
-                    pts_us,
-                    frame_index,
-                    encoded_bytes,
-                )
+                if isinstance(encoded, EncodedH264Frame):
+                    packet = pack_h264_frame(
+                        frame_kind,
+                        segment_id,
+                        pts_us,
+                        frame_index,
+                        encoded_bytes,
+                        keyframe=encoded.keyframe,
+                    )
+                    last_encoded = None
+                else:
+                    packet = pack_frame(
+                        frame_kind,
+                        segment_id,
+                        pts_us,
+                        frame_index,
+                        encoded_bytes,
+                    )
+                    last_encoded = encoded_bytes
                 if not put_blocking(
                     network_queue,
                     loop,
@@ -482,17 +525,59 @@ def live_encode_worker(
                 stop,
             )
 
-    log(
-        f"live encoder started: format={extension} "
-        f"threads={encode_threads} quality={args.jpeg_quality}"
-    )
-    executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=encode_threads,
-        thread_name_prefix="avatar-webp",
-    )
+    def h264_error(message: str) -> None:
+        put_blocking(
+            network_queue,
+            loop,
+            ("error", message),
+            stop,
+        )
+        stop.set()
+
+    output_width = int(state.model.width)
+    output_height = int(state.model.height)
+    if stream_width > 0 and output_width > stream_width:
+        output_height = round(output_height * stream_width / output_width)
+        output_width = stream_width
+    output_width -= output_width % 2
+    output_height -= output_height % 2
+    encoder_flush_seq = state.pipeline.flush_seq
+
+    def create_h264_encoder() -> H264Encoder:
+        return H264Encoder(
+            width=output_width,
+            height=output_height,
+            fps=args.fps,
+            on_error=h264_error,
+        )
+
+    try:
+        if use_h264:
+            h264_encoder = create_h264_encoder()
+            log(
+                f"live encoder started: format=h264 "
+                f"size={output_width}x{output_height} fps={args.fps}"
+            )
+        else:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=encode_threads,
+                thread_name_prefix="avatar-image",
+            )
+            log(
+                f"live encoder started: format={extension} "
+                f"threads={encode_threads} quality={args.jpeg_quality}"
+            )
+    except Exception:
+        put_blocking(
+            network_queue,
+            loop,
+            ("error", traceback.format_exc()),
+            stop,
+        )
+        return
     sender = threading.Thread(
         target=ordered_sender,
-        name="avatar-webp-sender",
+        name="avatar-frame-sender",
         daemon=True,
     )
     sender.start()
@@ -501,6 +586,17 @@ def live_encode_worker(
             item = get_blocking(raw_queue, loop, stop)
             if item is None:
                 return
+            with state.pipeline.lock:
+                current_flush_seq = state.pipeline.flush_seq
+            if use_h264 and current_flush_seq != encoder_flush_seq:
+                assert h264_encoder is not None
+                h264_encoder.close()
+                h264_encoder = create_h264_encoder()
+                encoder_flush_seq = current_flush_seq
+                log(
+                    "H.264 encoder restarted for flush "
+                    f"seq={encoder_flush_seq}"
+                )
             kind = item[0]
             if kind in ("segment", "segment_end", "error"):
                 if not put_ordered(None, ("control", item)):
@@ -516,46 +612,57 @@ def live_encode_worker(
 
             _, frame_kind, segment_id, pts_us, frame_index, frame = item
             if frame_kind == FRAME_HOLD:
-                # Repeat the whole composite: re-blending the old face onto a
-                # newer background frame would misalign it.
                 frame_kind = FRAME_SILENT
-                cycle = state.model.avatar.frame_list_cycle
-                fallback = cycle[frame_index % len(cycle)]
-                if stream_width > 0 and fallback.shape[1] > stream_width:
-                    height = round(fallback.shape[0] * stream_width / fallback.shape[1])
-                    fallback = cv2.resize(
-                        fallback,
-                        (stream_width, height),
-                        interpolation=cv2.INTER_AREA,
+                if use_h264:
+                    fallback = last_composite
+                    if fallback is None:
+                        cycle = state.model.avatar.frame_list_cycle
+                        fallback = resize_for_stream(
+                            cycle[frame_index % len(cycle)]
+                        )
+                    assert h264_encoder is not None
+                    future = h264_encoder.submit(fallback)
+                else:
+                    # Repeat the whole image composite: re-blending the old
+                    # face onto a newer background frame would misalign it.
+                    cycle = state.model.avatar.frame_list_cycle
+                    fallback = resize_for_stream(
+                        cycle[frame_index % len(cycle)]
                     )
-                if not put_ordered(
-                    None,
-                    (
-                        "hold",
-                        frame_kind,
-                        segment_id,
-                        pts_us,
-                        frame_index,
-                        fallback,
-                    ),
-                ):
+                    future = None
+                metadata = (
+                    "hold" if not use_h264 else "frame",
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    fallback,
+                    encoder_flush_seq,
+                )
+                if not put_ordered(future, metadata):
                     return
             else:
                 if frame_kind == FRAME_GENERATED:
                     combined = pipeline.blend_frame(frame_index, frame)
                 else:
                     combined = frame
-                if stream_width > 0 and combined.shape[1] > stream_width:
-                    height = round(combined.shape[0] * stream_width / combined.shape[1])
-                    combined = cv2.resize(combined, (stream_width, height), interpolation=cv2.INTER_AREA)
+                combined = resize_for_stream(combined)
+                last_composite = combined
+                if use_h264:
+                    assert h264_encoder is not None
+                    future = h264_encoder.submit(combined)
+                else:
+                    assert executor is not None
+                    future = executor.submit(encode_prepared, combined)
                 if not put_ordered(
-                    executor.submit(encode_prepared, combined),
+                    future,
                     (
                         "frame",
                         frame_kind,
                         segment_id,
                         pts_us,
                         frame_index,
+                        encoder_flush_seq,
                     ),
                 ):
                     return
@@ -570,11 +677,14 @@ def live_encode_worker(
     finally:
         # Stop the producer side of the bounded queue and wait for all accepted
         # encode jobs to retire before the caller tears down queues/threads.
+        if h264_encoder is not None:
+            h264_encoder.close()
         try:
             while not ordered_queue.full():
                 ordered_queue.put(None, timeout=0.1)
                 break
         except (std_queue.Full, ValueError):
             pass
-        executor.shutdown(wait=True, cancel_futures=False)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
         sender.join(timeout=5)

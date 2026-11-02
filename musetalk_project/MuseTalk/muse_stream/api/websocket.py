@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 import traceback
@@ -40,6 +41,16 @@ class LiveStreamSession:
         self.control_messages: list[dict[str, Any]] = []
         self.max_prefetch_frames = 0
         self.flush_seq = state.pipeline.flush_seq
+        default_format = os.environ.get("AVATAR_STREAM_FORMAT", "h264").lower()
+        requested_format = (
+            websocket.query_params.get("video_codec", "")
+            or default_format
+        ).lower()
+        self.stream_format = (
+            requested_format
+            if requested_format in ("h264", "h264_annexb", "webp", "jpeg")
+            else default_format
+        )
 
     async def run(self) -> None:
         state = self.state
@@ -132,6 +143,7 @@ class LiveStreamSession:
                 self.network_queue,
                 loop,
                 self.stop,
+                self.stream_format,
             ),
             daemon=True,
         )
@@ -171,6 +183,15 @@ class LiveStreamSession:
                     "clock": "audio-samples",
                     "width": state.model.width,
                     "height": state.model.height,
+                    "video_codec": (
+                        "h264"
+                        if self.stream_format in ("h264", "h264_annexb")
+                        else self.stream_format
+                    ),
+                    "codec_string": os.environ.get(
+                        "AVATAR_H264_CODEC_STRING",
+                        "avc1.4D4028",
+                    ),
                 }
             )
             assert self.encoder is not None and self.inference is not None
@@ -207,7 +228,7 @@ class LiveStreamSession:
                     await self.websocket.send_json(
                         {
                             "type": "error",
-                            "message": "推理线程异常",
+                            "message": "数字人推理或编码线程异常",
                             "detail": item[1],
                         }
                     )

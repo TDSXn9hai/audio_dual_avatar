@@ -105,3 +105,13 @@ def test_avatar_only_voice_reference_is_wired_without_changing_omni_default():
     assert "/api/avatar_ref_audio" in app
     assert "ref_audio_base64: voiceRef.base64" in app
     assert "tts_ref_audio_base64: voiceRef.base64" in app
+
+
+def test_avatar_player_supports_h264_webcodecs_and_webp_fallback():
+    player = (DEMO_ROOT / "static" / "avatar" / "avatar-player.js").read_text()
+    assert "video_codec=h264" not in player
+    assert "video_codec=${codecQuery}" in player
+    assert "new VideoDecoder" in player
+    assert "avc: { format: 'annexb' }" in player
+    assert "H264_FRAME_MAGIC" in player
+    assert "this.videoCodec = 'webp'" in player
