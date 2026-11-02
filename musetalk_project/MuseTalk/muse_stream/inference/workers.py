@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import queue as std_queue
 import threading
 import time
 import traceback
@@ -355,6 +356,146 @@ def live_encode_worker(
     use_webp = os.environ.get("AVATAR_STREAM_FORMAT", "webp").lower() == "webp"
     extension = ".webp" if use_webp else ".jpg"
     quality_key = cv2.IMWRITE_WEBP_QUALITY if use_webp else cv2.IMWRITE_JPEG_QUALITY
+    encode_threads_raw = os.environ.get("AVATAR_ENCODE_THREADS", "4") or "4"
+    try:
+        encode_threads = int(encode_threads_raw)
+    except ValueError:
+        log(
+            f"invalid AVATAR_ENCODE_THREADS={encode_threads_raw!r}; "
+            "falling back to 4"
+        )
+        encode_threads = 4
+    encode_threads = max(1, min(32, encode_threads))
+    # Keep several frames in flight without allowing a full-resolution
+    # backlog to grow without bound.
+    ordered_queue: std_queue.Queue = std_queue.Queue(
+        maxsize=max(8, encode_threads * 4),
+    )
+    sender_gone = threading.Event()
+
+    def encode_prepared(frame: np.ndarray) -> bytes | None:
+        ok, encoded = cv2.imencode(
+            extension,
+            frame,
+            [quality_key, args.jpeg_quality],
+        )
+        if not ok and use_webp:
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
+            )
+        return encoded.tobytes() if ok else None
+
+    def put_ordered(
+        future: concurrent.futures.Future | None,
+        metadata: tuple,
+    ) -> bool:
+        while not stop.is_set() and not sender_gone.is_set():
+            try:
+                ordered_queue.put((future, metadata), timeout=0.1)
+                return True
+            except std_queue.Full:
+                continue
+        return False
+
+    def ordered_sender() -> None:
+        nonlocal count, last_encoded
+        try:
+            while True:
+                try:
+                    item = ordered_queue.get(timeout=0.1)
+                except std_queue.Empty:
+                    if stop.is_set() or sender_gone.is_set():
+                        return
+                    continue
+                if item is None:
+                    return
+                future, metadata = item
+                item_type = metadata[0]
+
+                if item_type == "control":
+                    control = metadata[1]
+                    if not put_blocking(network_queue, loop, control, stop):
+                        return
+                    if control[0] == "error":
+                        stop.set()
+                        return
+                    continue
+
+                _, frame_kind, segment_id, pts_us, frame_index = metadata[:5]
+                if item_type == "hold":
+                    encoded_bytes = last_encoded
+                    if encoded_bytes is None:
+                        # This is only possible when a hold is emitted before
+                        # the first encoded frame. Encode the fallback once.
+                        encoded_bytes = encode_prepared(metadata[5])
+                else:
+                    assert future is not None
+                    try:
+                        encoded_bytes = future.result()
+                    except Exception:
+                        log(traceback.format_exc())
+                        continue
+                if encoded_bytes is None:
+                    continue
+                with state.pipeline.lock:
+                    canceled = segment_id in state.pipeline.canceled_ids
+                if canceled:
+                    continue
+                last_encoded = encoded_bytes
+                packet = pack_frame(
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    encoded_bytes,
+                )
+                if not put_blocking(
+                    network_queue,
+                    loop,
+                    (
+                        "frame",
+                        frame_kind,
+                        segment_id,
+                        pts_us,
+                        frame_index,
+                        packet,
+                    ),
+                    stop,
+                ):
+                    return
+                count += 1
+                if count % 500 == 0:
+                    log(
+                        f"encoded {count} live frames "
+                        f"at={time.monotonic() - started:.3f}s "
+                        f"network_queue={network_queue.qsize()} "
+                        f"encode_threads={encode_threads}"
+                    )
+        except Exception:
+            sender_gone.set()
+            put_blocking(
+                network_queue,
+                loop,
+                ("error", traceback.format_exc()),
+                stop,
+            )
+
+    log(
+        f"live encoder started: format={extension} "
+        f"threads={encode_threads} quality={args.jpeg_quality}"
+    )
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=encode_threads,
+        thread_name_prefix="avatar-webp",
+    )
+    sender = threading.Thread(
+        target=ordered_sender,
+        name="avatar-webp-sender",
+        daemon=True,
+    )
+    sender.start()
     try:
         while not stop.is_set():
             item = get_blocking(raw_queue, loop, stop)
@@ -362,7 +503,8 @@ def live_encode_worker(
                 return
             kind = item[0]
             if kind in ("segment", "segment_end", "error"):
-                put_blocking(network_queue, loop, item, stop)
+                if not put_ordered(None, ("control", item)):
+                    return
                 if kind == "error":
                     return
                 if kind == "segment":
@@ -373,15 +515,32 @@ def live_encode_worker(
                 continue
 
             _, frame_kind, segment_id, pts_us, frame_index, frame = item
-            if frame_kind == FRAME_HOLD and last_encoded is not None:
+            if frame_kind == FRAME_HOLD:
                 # Repeat the whole composite: re-blending the old face onto a
                 # newer background frame would misalign it.
                 frame_kind = FRAME_SILENT
+                cycle = state.model.avatar.frame_list_cycle
+                fallback = cycle[frame_index % len(cycle)]
+                if stream_width > 0 and fallback.shape[1] > stream_width:
+                    height = round(fallback.shape[0] * stream_width / fallback.shape[1])
+                    fallback = cv2.resize(
+                        fallback,
+                        (stream_width, height),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                if not put_ordered(
+                    None,
+                    (
+                        "hold",
+                        frame_kind,
+                        segment_id,
+                        pts_us,
+                        frame_index,
+                        fallback,
+                    ),
+                ):
+                    return
             else:
-                if frame_kind == FRAME_HOLD:
-                    frame_kind = FRAME_SILENT
-                    cycle = state.model.avatar.frame_list_cycle
-                    frame = cycle[frame_index % len(cycle)]
                 if frame_kind == FRAME_GENERATED:
                     combined = pipeline.blend_frame(frame_index, frame)
                 else:
@@ -389,53 +548,33 @@ def live_encode_worker(
                 if stream_width > 0 and combined.shape[1] > stream_width:
                     height = round(combined.shape[0] * stream_width / combined.shape[1])
                     combined = cv2.resize(combined, (stream_width, height), interpolation=cv2.INTER_AREA)
-                ok, encoded = cv2.imencode(
-                    extension,
-                    combined,
-                    [quality_key, args.jpeg_quality],
-                )
-                if not ok and use_webp:
-                    ok, encoded = cv2.imencode(
-                        ".jpg",
-                        combined,
-                        [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
-                    )
-                if not ok:
-                    continue
-                encoded_bytes = encoded.tobytes()
-                last_encoded = encoded_bytes
-            packet = pack_frame(
-                frame_kind,
-                segment_id,
-                pts_us,
-                frame_index,
-                last_encoded,
-            )
-            if not put_blocking(
-                network_queue,
-                loop,
-                (
-                    "frame",
-                    frame_kind,
-                    segment_id,
-                    pts_us,
-                    frame_index,
-                    packet,
-                ),
-                stop,
-            ):
-                return
-            count += 1
-            if count % 500 == 0:
-                log(
-                    f"encoded {count} live frames "
-                    f"at={time.monotonic() - started:.3f}s "
-                    f"network_queue={network_queue.qsize()}"
-                )
+                if not put_ordered(
+                    executor.submit(encode_prepared, combined),
+                    (
+                        "frame",
+                        frame_kind,
+                        segment_id,
+                        pts_us,
+                        frame_index,
+                    ),
+                ):
+                    return
     except Exception:
+        sender_gone.set()
         put_blocking(
             network_queue,
             loop,
             ("error", traceback.format_exc()),
             stop,
         )
+    finally:
+        # Stop the producer side of the bounded queue and wait for all accepted
+        # encode jobs to retire before the caller tears down queues/threads.
+        try:
+            while not ordered_queue.full():
+                ordered_queue.put(None, timeout=0.1)
+                break
+        except (std_queue.Full, ValueError):
+            pass
+        executor.shutdown(wait=True, cancel_futures=False)
+        sender.join(timeout=5)

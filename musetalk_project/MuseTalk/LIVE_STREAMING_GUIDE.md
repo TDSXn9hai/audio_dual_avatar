@@ -322,8 +322,8 @@ data/audio/ 新文件
 
 | 参数 | 当前值 | 说明 |
 |---|---:|---|
-| `avatar.id` | `musetalk_test_avatar` | 缓存目录名 |
-| `avatar.video_path` | `data/video/musetalk_test_video.mp4` | 数字人源视频 |
+| `avatar.id` | `knowledge_host_720p` | 默认缓存目录名 |
+| `avatar.video_path` | `data/video/knowledge_host_720p.mp4` | 默认数字人源视频；原形象可用 `streaming_duplex.yaml` 切回 |
 | `avatar.bbox_shift` | `0` | v1.5 固定为 0 |
 | `avatar.preparation` | `auto` | 有完整缓存则复用，否则重新预处理 |
 | `avatar.extra_margin` | `10` | v1.5 下巴扩展像素 |

@@ -32,7 +32,9 @@ PYTHON="${VENV_DIR}/bin/python"
 MINICPM_DIR="${ROOT}/minicpm_demo"
 MUSETALK_PROJECT="${ROOT}/musetalk_project"
 MUSETALK_DIR="${MUSETALK_PROJECT}/MuseTalk"
-MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/streaming_duplex.yaml}"
+# The 720p knowledge-sharing avatar is the default. Set MUSETALK_CONFIG to
+# configs/streaming_duplex.yaml to run the original avatar cache as fallback.
+MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/streaming_duplex_knowledge.yaml}"
 MUSETALK_PORT=8000
 GATEWAY_PORT="${DEMO_PORT:-8006}"
 RUN_DIR="${ROOT}/.run"

@@ -21,6 +21,35 @@ This repository contains code only. Model weights (~23 GB) are downloaded by `in
 ./start_avatar.sh stop
 ```
 
+### Default 720p knowledge-sharing avatar
+
+`./start_avatar.sh` now starts the 720p knowledge-sharing avatar by default.
+The original `musetalk_test_avatar` configuration and cache remain available as
+a fallback.
+
+```bash
+# Build the separate avatar cache once with the mmpose-capable venv.
+cd musetalk_project/MuseTalk
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. PATH="../../minicpm_demo/.bin:$PATH" \
+  ../venv/bin/python scripts/realtime_inference.py \
+  --version v15 --gpu_id 0 \
+  --unet_config ./models/musetalkV15/musetalk.json \
+  --unet_model_path ./models/musetalkV15/unet.pth \
+  --whisper_dir ./models/whisper \
+  --inference_config configs/inference/prepare_knowledge_host.yaml \
+  --parsing_mode jaw --left_cheek_width 90 --right_cheek_width 90
+
+# Start the full stack with the new default avatar.
+cd ../..
+./start_avatar.sh start
+
+# Start with the original avatar cache as a fallback.
+MUSETALK_CONFIG=configs/streaming_duplex.yaml ./start_avatar.sh start
+```
+
+The cache is generated under
+`musetalk_project/MuseTalk/results/v15/avatars/knowledge_host_720p/`.
+
 ## Layout
 
 - `minicpm_demo/` — MiniCPM-o 4.5 full-duplex demo (gateway, worker, backend, web UI) with the avatar bridge and the `/avatar` page
@@ -29,3 +58,5 @@ This repository contains code only. Model weights (~23 GB) are downloaded by `in
 - `requirements-avatar.lock.txt`, `weights.sha256` — pinned packages and weight checksums
 
 Design notes, scheduling, bridge and frontend details (Chinese): [DIGITAL_HUMAN_INTEGRATION.md](DIGITAL_HUMAN_INTEGRATION.md).
+
+Platform integration and API handoff guide (Chinese): [PLATFORM_INTEGRATION_GUIDE.md](PLATFORM_INTEGRATION_GUIDE.md).

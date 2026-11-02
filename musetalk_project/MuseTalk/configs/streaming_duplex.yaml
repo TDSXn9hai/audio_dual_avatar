@@ -1,3 +1,7 @@
+# LEGACY/BACKUP: original avatar configuration.
+# The default configuration is streaming_duplex_knowledge.yaml. This file and
+# the musetalk_test_avatar cache remain available as a fallback.
+#
 # MuseTalk streaming driven by MiniCPM-o full-duplex audio.
 # Same as streaming_web.yaml except the window cadence and idle exit:
 # MiniCPM-o emits 1 s audio chunks, so the first window is 20 frames

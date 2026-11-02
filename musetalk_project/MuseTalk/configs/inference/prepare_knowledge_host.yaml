@@ -1,0 +1,5 @@
+knowledge_host_720p:
+  preparation: true
+  video_path: data/video/knowledge_host_720p.mp4
+  bbox_shift: 0
+  audio_clips: {}

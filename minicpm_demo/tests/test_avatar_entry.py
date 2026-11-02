@@ -35,6 +35,31 @@ def test_avatar_entry_assets_exist():
         assert (avatar_dir / name).is_file(), name
 
 
+def test_default_avatar_and_poster_use_knowledge_video():
+    root = DEMO_ROOT.parent
+    config = yaml.safe_load(
+        (
+            root
+            / "musetalk_project"
+            / "MuseTalk"
+            / "configs"
+            / "streaming_duplex_knowledge.yaml"
+        ).read_text()
+    )
+    assert config["avatar"]["id"] == "knowledge_host_720p"
+    assert config["avatar"]["video_path"] == "data/video/knowledge_host_720p.mp4"
+    launcher = (root / "start_avatar.sh").read_text()
+    assert (
+        'MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/'
+        'streaming_duplex_knowledge.yaml}"'
+    ) in launcher
+    poster = cv2.imread(
+        str(DEMO_ROOT / "static" / "avatar" / "avatar-poster.jpg")
+    )
+    assert poster is not None
+    assert poster.shape[:2] == (1344, 768)
+
+
 def test_opencv_webp_round_trip():
     frame = np.zeros((864, 480, 3), dtype=np.uint8)
     ok, encoded = cv2.imencode(".webp", frame, [cv2.IMWRITE_WEBP_QUALITY, 88])

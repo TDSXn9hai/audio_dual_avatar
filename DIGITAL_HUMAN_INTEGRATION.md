@@ -43,7 +43,7 @@ AvatarBridge ── ws://127.0.0.1:8000/ws/minicpm ──► MuseTalk stream_ser
 ./start_avatar.sh stop
 ```
 
-- 启动顺序：先启动 MuseTalk（GPU 0，端口 8000，配置 `configs/streaming_duplex.yaml`），等 `/api/status` 返回 ready；再用共享 venv 调用 `minicpm_demo/start_all.sh`（gateway 8006、backend 22500、worker 22400）。
+- 启动顺序：先启动 MuseTalk（GPU 0，端口 8000，默认配置 `configs/streaming_duplex_knowledge.yaml`），等 `/api/status` 返回 ready；再用共享 venv 调用 `minicpm_demo/start_all.sh`（gateway 8006、backend 22500、worker 22400）。原 `configs/streaming_duplex.yaml` 与 `musetalk_test_avatar` 缓存保留为备用。
 - `start_avatar.sh` 会读取 `AVATAR_ENV_FILE`（默认 `./.avatar-env`），支持 `MINICPM_CUDA_VISIBLE_DEVICES` 和 `MUSETALK_CUDA_VISIBLE_DEVICES` 拆分双卡；未配置时两者都回落到 `CUDA_VISIBLE_DEVICES` 或 GPU 0。可参考 `.avatar-env.example`，不要提交机器专用 UUID。
 - 为 gateway 设置两个环境变量：`AVATAR_BRIDGE_URL=ws://127.0.0.1:8000/ws/minicpm`（旁路），`AVATAR_HTTP_URL=http://127.0.0.1:8000`（页面代理）。
 - 重复 start 会跳过已运行的服务；stop 先等 30 秒，进程未退出再发 `kill -9`。
@@ -140,7 +140,7 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
   - 在 `_send_controls()` 中检测 `flush_seq` 变化，丢弃已排队帧并推送 `flush` 消息。
   - **修复原有缺陷**：viewer 在空闲时断开，服务端主循环可能永远不再发送数据、检测不到断开，导致之后所有新 viewer 被"已有直播观众连接"拒绝（刷新页面就进不去）。现在 ACK 读取任务发现连接关闭时置位 `viewer_gone`，主循环据此退出。
 - `web/app.js`（MuseTalk 自带调试页）、`headless_live_viewer.py`：处理 `flush` 消息。
-- 新配置 `configs/streaming_duplex.yaml`（原 `streaming_web.yaml` 未改），相对原配置的区别：
+- 默认配置 `configs/streaming_duplex_knowledge.yaml` 使用 720P 知识分享形象；备用配置 `configs/streaming_duplex.yaml` 使用原 `musetalk_test_avatar` 缓存。流式参数相对原配置的区别：
 
 | 配置项 | 值 | 原值 |
 |---|---|---|
@@ -167,6 +167,7 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 
 - 从 MuseTalk `web/app.js` 移植 `/ws/live` 客户端：解析 24 字节帧头（`MTF1`、kind、segment id、pts_us、frame index）、按 `segment` 消息拉取并解码 WAV、ACK 回传播放进度、处理 `flush`。
 - 默认接收 WebP 帧（同时兼容 JPEG）；MuseTalk worker 通过 `AVATAR_STREAM_FORMAT=webp` 编码。保持本地现有 480×864、`prebuffer: 32`、客户端 8 帧起播和 4 秒 prefetch 参数。
+- WebP 编码使用独立线程池，`AVATAR_ENCODE_THREADS` 默认 4。编码结果按 `frame_index` 严格重排后写入网络队列，避免多线程乱序破坏 ACK 和播放时间轴。本机 768×1344、quality 88 的编码基准约为：1 线程 10 FPS、2 线程 20 FPS、4 线程 39 FPS、8 线程 79 FPS；4 线程已高于 24 FPS 播放需求。
 - 在 Start 点击时创建 AudioContext 并连接（满足浏览器自动播放限制，也保证模型开口前 viewer 已连上，MuseTalk 只在有 viewer 时渲染）。断开后每 3 秒自动重连。
 - **音视频同步（音频为主时钟）**：
   - 每个窗口收到 8 帧（`CLIENT_PREBUFFER_FRAMES`）且音频解码完成后才排上播放。
@@ -199,7 +200,8 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 - `minicpm_demo/static/avatar/avatar.html`、`avatar.css`、`avatar-app.js`、`avatar-poster.jpg`、`speech-interruptor.js`
 - `minicpm_demo/static/avatar/avatar-player.js`
 - `musetalk_project/MuseTalk/muse_stream/audio/minicpm.py`
-- `musetalk_project/MuseTalk/configs/streaming_duplex.yaml`
+- `musetalk_project/MuseTalk/configs/streaming_duplex_knowledge.yaml`（默认）
+- `musetalk_project/MuseTalk/configs/streaming_duplex.yaml`（原形象备用）
 
 修改：
 
