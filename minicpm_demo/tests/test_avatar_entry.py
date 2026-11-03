@@ -83,10 +83,10 @@ def test_avatar_latency_parameters_stay_at_existing_values():
 
 
 def test_avatar_default_prompt_is_chinese_knowledge_sharing():
-    app = (DEMO_ROOT / "static" / "avatar" / "avatar-app.js").read_text()
-    page = (DEMO_ROOT / "static" / "avatar" / "avatar.html").read_text()
-    assert "中文知识传播助手" in app
-    assert "中文知识传播助手" in page
+    prompt = (
+        DEMO_ROOT / "assets" / "prompts" / "avatar" / "knowledge_host.txt"
+    ).read_text()
+    assert "中文知识传播助手" in prompt
 
 
 def test_avatar_only_voice_reference_is_wired_without_changing_omni_default():
@@ -101,8 +101,15 @@ def test_avatar_only_voice_reference_is_wired_without_changing_omni_default():
     )
     assert (DEMO_ROOT / config["audio"]["avatar_ref_audio_path"]).is_file()
 
+    presets = yaml.safe_load(
+        (DEMO_ROOT / "assets" / "avatar_presets.yaml").read_text()
+    )
+    current = presets["presets"]["knowledge_host_720p"]
+    classic = presets["presets"]["musetalk_test_avatar"]
+    assert current["voice_ref"] == "assets/ref_audio/ref_avatar_default.wav"
+    assert classic["voice_ref"] == "assets/ref_audio/ref_minicpm_signature.wav"
+
     app = (DEMO_ROOT / "static" / "avatar" / "avatar-app.js").read_text()
-    assert "/api/avatar_ref_audio" in app
     assert "ref_audio_base64: voiceRef.base64" in app
     assert "tts_ref_audio_base64: voiceRef.base64" in app
 
@@ -115,3 +122,23 @@ def test_avatar_player_supports_h264_webcodecs_and_webp_fallback():
     assert "avc: { format: 'annexb' }" in player
     assert "H264_FRAME_MAGIC" in player
     assert "this.videoCodec = 'webp'" in player
+
+
+def test_avatar_preset_selector_is_above_prompt_and_binds_voice():
+    page = (DEMO_ROOT / "static" / "avatar" / "avatar.html").read_text()
+    app = (DEMO_ROOT / "static" / "avatar" / "avatar-app.js").read_text()
+    presets = yaml.safe_load(
+        (DEMO_ROOT / "assets" / "avatar_presets.yaml").read_text()
+    )
+
+    assert page.index('id="avatarPresetGrid"') < page.index('id="promptTitle"')
+    assert "knowledge_host_720p" in presets["presets"]
+    assert "musetalk_test_avatar" in presets["presets"]
+    assert "knowledge_host_720p" not in app
+    assert "musetalk_test_avatar" not in app
+    assert "fetch('/avatar-live/api/avatar-presets'" in app
+    assert "/activate`" in app
+    assert "preset.voice.audio_url" in app
+    assert "applyPresetPrompt" in app
+    assert "promptDraftKey" in app
+    assert "grid.replaceChildren()" in app

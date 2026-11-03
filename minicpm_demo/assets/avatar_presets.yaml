@@ -1,0 +1,27 @@
+version: 1
+default_preset: knowledge_host_720p
+presets:
+  knowledge_host_720p:
+    name: 知识分享
+    description: 720p 知识传播数字人
+    avatar_id: knowledge_host_720p
+    voice_ref: assets/ref_audio/ref_avatar_default.wav
+    prompt_file: assets/prompts/avatar/knowledge_host.txt
+    order: 10
+    enabled: true
+  musetalk_test_avatar:
+    name: 经典形象
+    description: 480×864 经典数字人
+    avatar_id: musetalk_test_avatar
+    voice_ref: assets/ref_audio/ref_minicpm_signature.wav
+    prompt_file: assets/prompts/avatar/classic.txt
+    order: 20
+    enabled: true
+  ecommerce:
+    name: 电商小选
+    description: 由 add_avatar.sh 添加的数字人形象
+    avatar_id: ecommerce
+    voice_ref: assets/ref_audio/ref_minicpm_signature.wav
+    prompt_file: assets/prompts/avatar/ecommerce.txt
+    order: 30
+    enabled: true

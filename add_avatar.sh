@@ -1,0 +1,621 @@
+#!/usr/bin/env bash
+# Add a MuseTalk avatar from a source video and bind it to a voice and prompt.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MINICPM_DIR="${ROOT}/minicpm_demo"
+MUSETALK_PROJECT="${ROOT}/musetalk_project"
+MUSETALK_DIR="${MUSETALK_PROJECT}/MuseTalk"
+SHARED_VENV="${AVATAR_VENV:-${ROOT}/.venv}"
+if [[ "${SHARED_VENV}" != /* ]]; then
+    SHARED_VENV="${ROOT}/${SHARED_VENV}"
+fi
+MUSETALK_VENV="${MUSETALK_PROJECT}/venv"
+PROJECT_PY="${SHARED_VENV}/bin/python"
+MUSETALK_PY="${MUSETALK_VENV}/bin/python"
+SHARED_ACTIVATE="${SHARED_VENV}/bin/activate"
+MUSETALK_ACTIVATE="${MUSETALK_VENV}/bin/activate"
+VOICE_DIR="${MINICPM_DIR}/assets/ref_audio"
+PROMPT_DIR="${MINICPM_DIR}/assets/prompts/avatar"
+PRESET_FILE="${MINICPM_DIR}/assets/avatar_presets.yaml"
+MANIFEST_FILE="${MINICPM_DIR}/MANIFEST.sha256"
+AVATAR_ROOT="${MUSETALK_DIR}/results/v15/avatars"
+
+GPU_ARG=""
+PRESET_ID=""
+PRESET_NAME=""
+PRESET_DESCRIPTION="由 add_avatar.sh 添加的数字人形象"
+DRY_RUN=0
+POSITIONAL=()
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./add_avatar.sh [options] VIDEO AVATAR_ID VOICE PROMPT
+
+Required arguments:
+  VIDEO       Reference video. It is normalized to 24 fps, H.264/yuv420p.
+  AVATAR_ID   New cache/preset ID. Letters, digits, '_' and '-' only.
+  VOICE       Voice reference path, or an existing filename under
+              minicpm_demo/assets/ref_audio/. "default" is also accepted.
+  PROMPT      Prompt file path, or an existing filename under
+              minicpm_demo/assets/prompts/avatar/. "knowledge_host" and
+              "classic" may omit the .txt suffix.
+
+Options:
+  --gpu N               Physical GPU index. Default: GPU with most free VRAM.
+  --preset-id ID        Preset ID. Default: AVATAR_ID.
+  --name NAME           Display name on the avatar card. Default: AVATAR_ID.
+  --description TEXT    Card description.
+  --dry-run             Validate and print the plan without writing files.
+  -h, --help            Show this help.
+
+Environment:
+  ADD_AVATAR_GPU          Same as --gpu; --gpu takes precedence.
+  ADD_AVATAR_MIN_FREE_MB  Minimum free VRAM for automatic GPU selection
+                          (default: 12000).
+  AVATAR_VENV             Shared project venv (default: ./.venv).
+
+The script activates the shared venv automatically. Video preprocessing runs
+in musetalk_project/venv because that environment provides mmpose/mmcv.
+
+Examples:
+  ./add_avatar.sh data/video/alice.mp4 alice_avatar data/alice.wav data/alice.txt
+  ./add_avatar.sh --gpu 1 video.mp4 alice default knowledge_host
+  ./add_avatar.sh --name "讲解员小艾" --dry-run video.mp4 alice voice.wav prompt.txt
+EOF
+}
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+step() {
+    echo
+    echo "==> $*"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpu)
+            [[ $# -ge 2 ]] || die "--gpu requires a value"
+            GPU_ARG="$2"
+            shift 2
+            ;;
+        --preset-id)
+            [[ $# -ge 2 ]] || die "--preset-id requires a value"
+            PRESET_ID="$2"
+            shift 2
+            ;;
+        --name)
+            [[ $# -ge 2 ]] || die "--name requires a value"
+            PRESET_NAME="$2"
+            shift 2
+            ;;
+        --description)
+            [[ $# -ge 2 ]] || die "--description requires a value"
+            PRESET_DESCRIPTION="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            POSITIONAL+=("$@")
+            break
+            ;;
+        -*)
+            die "unknown option: $1 (use -- before paths that start with '-')"
+            ;;
+        *)
+            POSITIONAL+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [[ ${#POSITIONAL[@]} -ne 4 ]]; then
+    usage >&2
+    exit 2
+fi
+
+VIDEO_ARG="${POSITIONAL[0]}"
+AVATAR_ID="${POSITIONAL[1]}"
+VOICE_ARG="${POSITIONAL[2]}"
+PROMPT_ARG="${POSITIONAL[3]}"
+PRESET_ID="${PRESET_ID:-${AVATAR_ID}}"
+PRESET_NAME="${PRESET_NAME:-${AVATAR_ID}}"
+REQUESTED_GPU="${GPU_ARG:-${ADD_AVATAR_GPU:-}}"
+MIN_FREE_MB="${ADD_AVATAR_MIN_FREE_MB:-12000}"
+
+[[ "${AVATAR_ID}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] \
+    || die "invalid AVATAR_ID: '${AVATAR_ID}'; use letters, digits, '_' or '-'"
+[[ "${PRESET_ID}" =~ ^[A-Za-z0-9_-]{1,64}$ ]] \
+    || die "invalid preset ID: '${PRESET_ID}'; use 1-64 letters, digits, '_' or '-'"
+[[ -z "${REQUESTED_GPU}" || "${REQUESTED_GPU}" =~ ^[0-9]+$ ]] \
+    || die "--gpu/ADD_AVATAR_GPU must be a numeric GPU index"
+[[ "${MIN_FREE_MB}" =~ ^[0-9]+$ ]] \
+    || die "ADD_AVATAR_MIN_FREE_MB must be a positive integer"
+
+cd "${ROOT}"
+
+[[ -f "${SHARED_ACTIVATE}" ]] \
+    || die "missing shared venv activation script: ${SHARED_ACTIVATE}; run ./install.sh first"
+[[ -f "${MUSETALK_ACTIVATE}" ]] \
+    || die "missing MuseTalk venv activation script: ${MUSETALK_ACTIVATE}; run ./install.sh first"
+# Activate the shared runtime for this process. The cache-building subshell
+# switches to the separate MuseTalk venv because only that one has mmpose.
+# shellcheck source=/dev/null
+source "${SHARED_ACTIVATE}"
+echo "Activated shared venv: ${SHARED_VENV}"
+
+resolve_asset() {
+    local raw="$1"
+    local directory="$2"
+    local default_suffix="$3"
+    local candidate
+
+    if [[ -f "${raw}" ]]; then
+        realpath -e -- "${raw}"
+        return 0
+    fi
+    for candidate in "${directory}/${raw}" "${directory}/${raw}${default_suffix}"; do
+        if [[ -f "${candidate}" ]]; then
+            realpath -e -- "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+[[ -f "${VIDEO_ARG}" ]] || die "reference video not found: ${VIDEO_ARG}"
+VIDEO_SOURCE="$(realpath -e -- "${VIDEO_ARG}")"
+
+if [[ "${VOICE_ARG}" == "default" ]]; then
+    VOICE_ARG="ref_avatar_default.wav"
+fi
+VOICE_SOURCE="$(resolve_asset "${VOICE_ARG}" "${VOICE_DIR}" ".wav")" \
+    || die "voice reference not found: ${VOICE_ARG}"
+PROMPT_SOURCE="$(resolve_asset "${PROMPT_ARG}" "${PROMPT_DIR}" ".txt")" \
+    || die "prompt file not found: ${PROMPT_ARG}"
+
+[[ -s "${VOICE_SOURCE}" ]] || die "voice reference is empty: ${VOICE_SOURCE}"
+[[ -s "${PROMPT_SOURCE}" ]] || die "prompt file is empty: ${PROMPT_SOURCE}"
+[[ -x "${MUSETALK_PY}" ]] \
+    || die "missing mmpose-capable Python: ${MUSETALK_PY}; run ./install.sh first"
+[[ -x "${PROJECT_PY}" ]] \
+    || die "missing shared Python: ${PROJECT_PY}; run ./install.sh first"
+[[ -f "${PRESET_FILE}" ]] || die "avatar preset config not found: ${PRESET_FILE}"
+[[ -f "${MANIFEST_FILE}" ]] || die "manifest not found: ${MANIFEST_FILE}"
+
+PATH="${MINICPM_DIR}/.bin:${PATH}" "${PROJECT_PY}" - \
+    "${PRESET_FILE}" \
+    "${PRESET_ID}" \
+    "${VOICE_SOURCE}" \
+    "${PROMPT_SOURCE}" <<'PY'
+import sys
+from pathlib import Path
+
+import librosa
+import yaml
+
+preset_path, preset_id, voice_path, prompt_path = sys.argv[1:]
+config = yaml.safe_load(Path(preset_path).read_text(encoding="utf-8"))
+if not isinstance(config, dict) or not isinstance(config.get("presets"), dict):
+    raise SystemExit(f"invalid avatar preset config: {preset_path}")
+if preset_id in config["presets"]:
+    raise SystemExit(f"avatar preset already exists: {preset_id}")
+
+audio, _ = librosa.load(voice_path, sr=16000, mono=True)
+if audio.size == 0:
+    raise SystemExit(f"voice reference has no audio samples: {voice_path}")
+prompt_text = Path(prompt_path).read_text(encoding="utf-8").strip()
+if not prompt_text:
+    raise SystemExit(f"prompt file is empty: {prompt_path}")
+if len(prompt_text.encode("utf-8")) > 64 * 1024:
+    raise SystemExit("prompt file exceeds the 64 KiB preset limit")
+print(f"Preflight assets OK: voice={audio.size / 16000:.1f}s, prompt={len(prompt_text)} chars")
+PY
+
+UNET_CONFIG="${MUSETALK_DIR}/models/musetalkV15/musetalk.json"
+UNET_MODEL="${MUSETALK_DIR}/models/musetalkV15/unet.pth"
+WHISPER_DIR="${MUSETALK_DIR}/models/whisper"
+[[ -s "${UNET_CONFIG}" ]] || die "missing MuseTalk config: ${UNET_CONFIG}"
+[[ -s "${UNET_MODEL}" ]] || die "missing MuseTalk model: ${UNET_MODEL}"
+[[ -d "${WHISPER_DIR}" ]] || die "missing Whisper model directory: ${WHISPER_DIR}"
+
+CACHE_DIR="${AVATAR_ROOT}/${AVATAR_ID}"
+VIDEO_DEST="${MUSETALK_DIR}/data/video/${AVATAR_ID}.mp4"
+VIDEO_TMP="${MUSETALK_DIR}/data/video/.${AVATAR_ID}.part.$$.mp4"
+PREP_CONFIG="${MUSETALK_DIR}/configs/inference/.add-avatar-${AVATAR_ID}.yaml"
+[[ ! -e "${CACHE_DIR}" ]] \
+    || die "avatar cache already exists: ${CACHE_DIR}; choose a new AVATAR_ID"
+[[ ! -e "${VIDEO_DEST}" ]] \
+    || die "normalized video already exists: ${VIDEO_DEST}; choose a new AVATAR_ID"
+
+voice_extension="${VOICE_SOURCE##*.}"
+if [[ "${voice_extension}" == "${VOICE_SOURCE}" ]] \
+    || [[ ! "${voice_extension}" =~ ^[A-Za-z0-9]{1,8}$ ]]; then
+    voice_extension="wav"
+fi
+
+if [[ "${VOICE_SOURCE}" == "${VOICE_DIR}/"* ]]; then
+    VOICE_DEST="${VOICE_SOURCE}"
+    VOICE_REL="assets/ref_audio/${VOICE_SOURCE#"${VOICE_DIR}/"}"
+    CREATE_VOICE=0
+else
+    VOICE_DEST="${VOICE_DIR}/${AVATAR_ID}_voice.${voice_extension}"
+    VOICE_REL="assets/ref_audio/${VOICE_DEST##*/}"
+    CREATE_VOICE=1
+    [[ ! -e "${VOICE_DEST}" ]] \
+        || die "voice destination already exists: ${VOICE_DEST}; choose a new AVATAR_ID"
+fi
+
+if [[ "${PROMPT_SOURCE}" == "${PROMPT_DIR}/"* ]]; then
+    PROMPT_DEST="${PROMPT_SOURCE}"
+    PROMPT_REL="assets/prompts/avatar/${PROMPT_SOURCE#"${PROMPT_DIR}/"}"
+    CREATE_PROMPT=0
+else
+    PROMPT_DEST="${PROMPT_DIR}/${AVATAR_ID}.txt"
+    PROMPT_REL="assets/prompts/avatar/${AVATAR_ID}.txt"
+    CREATE_PROMPT=1
+    [[ ! -e "${PROMPT_DEST}" ]] \
+        || die "prompt destination already exists: ${PROMPT_DEST}; choose a new AVATAR_ID"
+fi
+
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "Dry run: no files will be written."
+    echo "  Video source:  ${VIDEO_SOURCE}"
+    echo "  Video target:  ${VIDEO_DEST}"
+    echo "  Avatar ID:     ${AVATAR_ID}"
+    echo "  Preset ID:     ${PRESET_ID}"
+    echo "  Preset name:   ${PRESET_NAME}"
+    echo "  Cache target:  ${CACHE_DIR}"
+    echo "  Voice target:  ${VOICE_DEST} (${VOICE_REL})"
+    echo "  Prompt target: ${PROMPT_DEST} (${PROMPT_REL})"
+    echo "  GPU:           ${REQUESTED_GPU:-auto (most free VRAM)}"
+    echo "  Shared venv:   ${SHARED_VENV}"
+    echo "  MuseTalk venv: ${MUSETALK_VENV}"
+    exit 0
+fi
+
+if command -v flock >/dev/null 2>&1; then
+    mkdir -p "${ROOT}/.run"
+    exec 9>"${ROOT}/.run/add_avatar.lock"
+    flock -n 9 || die "another add_avatar.sh process is already running"
+fi
+
+SUCCESS=0
+CREATED_VIDEO=0
+CREATED_CACHE=0
+CREATED_VOICE=0
+CREATED_PROMPT=0
+
+cleanup() {
+    local status=$?
+    rm -f -- "${PREP_CONFIG}" "${VIDEO_TMP}"
+    if [[ "${status}" -ne 0 && "${SUCCESS}" -eq 0 ]]; then
+        if [[ "${CREATED_CACHE}" -eq 1 && -d "${CACHE_DIR}" ]]; then
+            rm -rf -- "${CACHE_DIR}"
+            echo "Rolled back incomplete avatar cache: ${CACHE_DIR}" >&2
+        fi
+        if [[ "${CREATED_VOICE}" -eq 1 ]]; then
+            rm -f -- "${VOICE_DEST}"
+        fi
+        if [[ "${CREATED_PROMPT}" -eq 1 ]]; then
+            rm -f -- "${PROMPT_DEST}"
+        fi
+        if [[ "${CREATED_VIDEO}" -eq 1 ]]; then
+            rm -f -- "${VIDEO_DEST}"
+        fi
+    fi
+}
+trap cleanup EXIT
+
+select_gpu() {
+    local candidate="${REQUESTED_GPU}"
+    local minimum="${MIN_FREE_MB}"
+    local best_gpu best_free
+
+    if [[ -n "${candidate}" ]]; then
+        [[ "${candidate}" =~ ^[0-9]+$ ]] || die "--gpu must be a numeric GPU index"
+        nvidia-smi -i "${candidate}" >/dev/null 2>&1 \
+            || die "GPU ${candidate} is not available"
+        echo "${candidate}"
+        return 0
+    fi
+
+    command -v nvidia-smi >/dev/null 2>&1 || die "nvidia-smi is required"
+    read -r best_free best_gpu < <(
+        nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+            | awk -F, '{gsub(/[[:space:]]/, "", $1); gsub(/[[:space:]]/, "", $2); print $2, $1}' \
+            | sort -k1,1nr \
+            | head -n 1
+    )
+    [[ -n "${best_gpu:-}" ]] || die "failed to query NVIDIA GPUs"
+    if (( best_free < minimum )); then
+        die "no GPU has ${minimum} MiB free VRAM (best: GPU ${best_gpu}, ${best_free} MiB)"
+    fi
+    echo "${best_gpu}"
+}
+
+find_ffmpeg() {
+    if [[ -x "${MINICPM_DIR}/.bin/ffmpeg" ]]; then
+        echo "${MINICPM_DIR}/.bin/ffmpeg"
+    elif command -v ffmpeg >/dev/null 2>&1; then
+        command -v ffmpeg
+    else
+        return 1
+    fi
+}
+
+step "[1/6] Preparing input video"
+FFMPEG="$(find_ffmpeg)" || die "ffmpeg not found; run ./install.sh first"
+FFMPEG_ENCODERS="$("${FFMPEG}" -hide_banner -encoders 2>/dev/null)" \
+    || die "failed to inspect ffmpeg encoders"
+[[ "${FFMPEG_ENCODERS}" == *libx264* ]] \
+    || die "ffmpeg does not provide libx264"
+mkdir -p "${MUSETALK_DIR}/data/video"
+CREATED_VIDEO=1
+"${FFMPEG}" -hide_banner -loglevel error -nostdin -y \
+    -i "${VIDEO_SOURCE}" \
+    -map 0:v:0 -an \
+    -vf "fps=24,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+    -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+    -movflags +faststart \
+    -f mp4 \
+    "${VIDEO_TMP}" \
+    || die "failed to normalize the input video"
+mv -- "${VIDEO_TMP}" "${VIDEO_DEST}"
+echo "Normalized video: ${VIDEO_DEST}"
+
+step "[2/6] Creating a cache-only preprocessing config"
+cat >"${PREP_CONFIG}" <<EOF
+${AVATAR_ID}:
+  preparation: true
+  video_path: data/video/${AVATAR_ID}.mp4
+  bbox_shift: 0
+  audio_clips: {}
+EOF
+echo "Preprocessing config: ${PREP_CONFIG}"
+
+step "[3/6] Generating the MuseTalk avatar cache"
+GPU_ID="$(select_gpu)"
+echo "Using physical GPU ${GPU_ID} (mapped to CUDA device 0)"
+mkdir -p \
+    "${MUSETALK_PROJECT}/.cache/huggingface" \
+    "${MUSETALK_PROJECT}/.cache/torch" \
+    "${MUSETALK_PROJECT}/.cache/matplotlib"
+CREATED_CACHE=1
+(
+    # Video preprocessing requires the mmpose-capable venv, not the shared venv.
+    # shellcheck source=/dev/null
+    source "${MUSETALK_ACTIVATE}"
+    cd "${MUSETALK_DIR}"
+    CUDA_VISIBLE_DEVICES="${GPU_ID}" \
+    PYTHONPATH=. \
+    PATH="${MINICPM_DIR}/.bin:${PATH}" \
+    XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
+    HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \
+    TORCH_HOME="${MUSETALK_PROJECT}/.cache/torch" \
+    MPLCONFIGDIR="${MUSETALK_PROJECT}/.cache/matplotlib" \
+    PYTHONUNBUFFERED=1 \
+    python scripts/realtime_inference.py \
+        --version v15 \
+        --gpu_id 0 \
+        --unet_config ./models/musetalkV15/musetalk.json \
+        --unet_model_path ./models/musetalkV15/unet.pth \
+        --whisper_dir ./models/whisper \
+        --inference_config "${PREP_CONFIG}" \
+        --fps 24 \
+        --parsing_mode jaw \
+        --left_cheek_width 90 \
+        --right_cheek_width 90
+) || die "avatar preprocessing failed; generated files were rolled back"
+
+step "[4/6] Validating the generated cache"
+"${PROJECT_PY}" - "${MUSETALK_DIR}" "${AVATAR_ID}" <<'PY'
+import sys
+from pathlib import Path
+
+musetalk_dir = Path(sys.argv[1])
+avatar_id = sys.argv[2]
+sys.path.insert(0, str(musetalk_dir))
+
+from muse_stream.avatar_registry import inspect_avatar_cache
+
+info = inspect_avatar_cache(avatar_id, "v15")
+if not info.valid:
+    raise SystemExit(f"invalid avatar cache: {info.error}")
+print(
+    f"Cache OK: {info.id}, {info.width}x{info.height}, "
+    f"{info.source_frame_count} source frames, {info.frame_count} loop frames"
+)
+PY
+
+step "[5/6] Installing voice, prompt and preset metadata"
+mkdir -p "${VOICE_DIR}" "${PROMPT_DIR}"
+if [[ "${CREATE_VOICE}" -eq 1 ]]; then
+    cp -- "${VOICE_SOURCE}" "${VOICE_DEST}"
+    CREATED_VOICE=1
+fi
+if [[ "${CREATE_PROMPT}" -eq 1 ]]; then
+    cp -- "${PROMPT_SOURCE}" "${PROMPT_DEST}"
+    CREATED_PROMPT=1
+fi
+
+PATH="${MINICPM_DIR}/.bin:${PATH}" "${PROJECT_PY}" - \
+    "${MINICPM_DIR}" \
+    "${AVATAR_ID}" \
+    "${PRESET_ID}" \
+    "${PRESET_NAME}" \
+    "${PRESET_DESCRIPTION}" \
+    "${VOICE_DEST}" \
+    "${PROMPT_DEST}" \
+    "${VOICE_REL}" \
+    "${PROMPT_REL}" <<'PY'
+import hashlib
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import librosa
+import yaml
+
+(
+    minicpm_dir,
+    avatar_id,
+    preset_id,
+    preset_name,
+    description,
+    voice_path,
+    prompt_path,
+    voice_rel,
+    prompt_rel,
+) = sys.argv[1:]
+
+minicpm_dir = Path(minicpm_dir)
+voice_path = Path(voice_path)
+prompt_path = Path(prompt_path)
+preset_path = minicpm_dir / "assets" / "avatar_presets.yaml"
+manifest_path = minicpm_dir / "MANIFEST.sha256"
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    mode = path.stat().st_mode if path.exists() else 0o644
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+audio, _ = librosa.load(str(voice_path), sr=16000, mono=True)
+if audio.size == 0:
+    raise SystemExit(f"voice reference has no audio samples: {voice_path}")
+print(f"Voice OK: {voice_path.name}, {audio.size / 16000:.1f}s")
+
+prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+if not prompt_text:
+    raise SystemExit(f"prompt file is empty: {prompt_path}")
+if len(prompt_text.encode("utf-8")) > 64 * 1024:
+    raise SystemExit("prompt file exceeds the 64 KiB preset limit")
+
+original_preset = preset_path.read_bytes()
+try:
+    config = yaml.safe_load(original_preset)
+except yaml.YAMLError as exc:
+    raise SystemExit(f"invalid avatar preset YAML: {exc}") from exc
+if not isinstance(config, dict) or int(config.get("version", 1)) != 1:
+    raise SystemExit("avatar preset YAML must be a version 1 object")
+presets = config.get("presets")
+if not isinstance(presets, dict):
+    raise SystemExit("avatar preset YAML has no presets map")
+if preset_id in presets:
+    raise SystemExit(f"avatar preset already exists: {preset_id}")
+
+orders = []
+for item in presets.values():
+    if isinstance(item, dict):
+        try:
+            orders.append(int(item.get("order", 0)))
+        except (TypeError, ValueError):
+            pass
+next_order = (max(orders) if orders else 0) + 10
+presets[preset_id] = {
+    "name": preset_name,
+    "description": description,
+    "avatar_id": avatar_id,
+    "voice_ref": voice_rel,
+    "prompt_file": prompt_rel,
+    "order": next_order,
+    "enabled": True,
+}
+
+yaml_text = yaml.safe_dump(
+    config,
+    allow_unicode=True,
+    sort_keys=False,
+    default_flow_style=False,
+)
+atomic_write(preset_path, yaml_text.encode("utf-8"))
+
+try:
+    updates = {
+        "./assets/avatar_presets.yaml": sha256(preset_path),
+        f"./{voice_rel}": sha256(voice_path),
+        f"./{prompt_rel}": sha256(prompt_path),
+    }
+    lines = manifest_path.read_text(encoding="utf-8").splitlines()
+
+    def entry_path(line):
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2 or len(parts[0]) != 64:
+            return None
+        return parts[1]
+
+    seen = set()
+    for index, line in enumerate(lines):
+        path = entry_path(line)
+        if path in updates:
+            lines[index] = f"{updates[path]}  {path}"
+            seen.add(path)
+
+    for path, digest in updates.items():
+        if path in seen:
+            continue
+        group = path.rsplit("/", 1)[0] + "/"
+        insert_at = None
+        for index, line in enumerate(lines):
+            existing = entry_path(line)
+            if existing is not None and existing.startswith(group):
+                insert_at = index + 1
+        if insert_at is None:
+            lines.append(f"{digest}  {path}")
+        else:
+            lines.insert(insert_at, f"{digest}  {path}")
+
+    atomic_write(manifest_path, ("\n".join(lines) + "\n").encode("utf-8"))
+except Exception:
+    atomic_write(preset_path, original_preset)
+    raise
+
+print(f"Preset OK: {preset_id} -> avatar={avatar_id}, order={next_order}")
+PY
+
+SUCCESS=1
+step "[6/6] Avatar added"
+echo "Avatar cache: ${CACHE_DIR}"
+echo "Preset:       ${PRESET_ID}"
+echo "Voice:        ${VOICE_REL}"
+echo "Prompt:       ${PROMPT_REL}"
+echo
+echo "Refresh /avatar and select the new card before starting a session."
+echo "API check:"
+echo "  curl -k https://127.0.0.1:8006/avatar-live/api/avatar-presets"
+echo "API activate:"
+echo "  curl -k -X POST https://127.0.0.1:8006/avatar-live/api/avatar-presets/${PRESET_ID}/activate"

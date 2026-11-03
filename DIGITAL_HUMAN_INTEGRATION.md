@@ -168,6 +168,12 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 - 从 MuseTalk `web/app.js` 移植 `/ws/live` 客户端：解析 24 字节帧头、按 `segment` 消息拉取并解码 WAV、ACK 回传播放进度、处理 `flush`。
 - 默认使用 H.264：MuseTalk 通过 ffmpeg/libx264 将合成帧编码为 Annex-B Access Unit，每条 WebSocket binary message 使用 `MTH1` 头携带 kind、关键帧标志、segment id、pts_us 和 frame index。
 - `/avatar` 播放器用 WebCodecs `VideoDecoder` 解码 `EncodedVideoChunk`，将输出的 `VideoFrame` 按 PTS 对齐原有音频主时钟后绘制到 Canvas。
+- `/avatar` 系统提示词上方根据
+  `assets/avatar_presets.yaml` 动态显示形象卡片；每个预设绑定一个 MuseTalk
+  `avatar_id`、一个参考音频文件和一个提示词文件。
+- 前端通过 `/avatar-live/api/avatar-presets` 获取预设数量与绑定内容，点击卡片调用
+  `/avatar-live/api/avatar-presets/{id}/activate`；提示词按预设和提示词哈希分别
+  保存草稿，切换形象时同步加载对应提示词和参考音频。
 - 客户端建连时通过 `/ws/live?video_codec=h264` 或 `?video_codec=webp` 选择编码。没有 `VideoDecoder`、配置失败或解码失败时自动回退 WebP。
 - H.264 默认目标码率 2 Mbps、最大 3 Mbps、每 120 帧一个周期 IDR；`flush` 时服务端重启编码器并立即产生新 IDR，客户端 reset 解码器后从该关键帧恢复。
 - H.264 是有状态编码，不能像 WebP 一样任意丢帧后直接恢复；hold 帧会重新编码上一张合成图，打断恢复依赖周期关键帧。
@@ -203,6 +209,9 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 - `start_avatar.sh`、`.venv/`（项目根目录）
 - `.avatar-env.example`、`.gitignore`
 - `minicpm_demo/gateway_modules/avatar_bridge.py`
+- `minicpm_demo/gateway_modules/avatar_presets.py`
+- `minicpm_demo/assets/avatar_presets.yaml`
+- `minicpm_demo/assets/prompts/avatar/*.txt`
 - `minicpm_demo/static/avatar/avatar.html`、`avatar.css`、`avatar-app.js`、`avatar-poster.jpg`、`speech-interruptor.js`
 - `minicpm_demo/static/avatar/avatar-player.js`
 - `musetalk_project/MuseTalk/muse_stream/audio/minicpm.py`

@@ -135,7 +135,9 @@ else
     FFMPEG_EXE="$("${PY}" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
 fi
 "${FFMPEG_EXE}" -version >/dev/null 2>&1 || die "ffmpeg is not usable: ${FFMPEG_EXE}"
-"${FFMPEG_EXE}" -hide_banner -encoders 2>/dev/null | grep -q 'libx264' \
+FFMPEG_ENCODERS="$("${FFMPEG_EXE}" -hide_banner -encoders 2>/dev/null)" \
+    || die "failed to inspect ffmpeg encoders: ${FFMPEG_EXE}"
+[[ "${FFMPEG_ENCODERS}" == *libx264* ]] \
     || die "ffmpeg has no libx264 encoder; H.264 avatar streaming requires it"
 # MiniCPM-o's start_all.sh puts .bin on PATH; MuseTalk looks in ffmpeg-4.4-amd64-static.
 mkdir -p "${MINICPM_DIR}/.bin" "${MUSETALK_DIR}/ffmpeg-4.4-amd64-static"
@@ -235,9 +237,11 @@ for f in latents.pt coords.pkl mask_coords.pkl avator_info.json; do
 done
 echo "Avatar cache OK: ${AVATAR_CACHE#"${ROOT}/"}"
 
-chmod +x "${ROOT}/start_avatar.sh" "${MINICPM_DIR}/start_all.sh" "${MINICPM_DIR}/stop_all.sh" 2>/dev/null || true
+chmod +x "${ROOT}/start_avatar.sh" "${ROOT}/add_avatar.sh" \
+    "${MINICPM_DIR}/start_all.sh" "${MINICPM_DIR}/stop_all.sh" 2>/dev/null || true
 echo
 echo "Installation complete."
 echo "  Python: ${PY}"
 echo "  Start:  ./start_avatar.sh        (then open https://<host>:8006/avatar)"
+echo "  Avatar: ./add_avatar.sh          (add an avatar from a source video)"
 echo "  Stop:   ./start_avatar.sh stop"
