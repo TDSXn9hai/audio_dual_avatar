@@ -40,6 +40,7 @@ class AvatarBridge:
         self.label = label
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_SIZE)
         self.task: Optional[asyncio.Task] = None
+        self.ready = asyncio.Event()
         self.force_listen = False
         self.dropped = 0
         self.failed = False
@@ -75,6 +76,23 @@ class AvatarBridge:
             self._put(json.dumps({"type": "bridge.flush", "reason": "force_listen"}))
         self.force_listen = force_listen
 
+    def flush(self, reason: str = "client_interrupt") -> None:
+        """Request an immediate MuseTalk barge-in without waiting for audio."""
+        if self.failed:
+            return
+        # The next client audio chunk is expected to carry force_listen=true.
+        # Remember that state so offer_up does not enqueue a duplicate flush.
+        self.force_listen = True
+        self._put(json.dumps({"type": "bridge.flush", "reason": reason}))
+
+    async def wait_ready(self, timeout: float = 5.0) -> bool:
+        """Wait for the bridge WebSocket to connect."""
+        try:
+            await asyncio.wait_for(self.ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        return not self.failed
+
     async def close(self) -> None:
         if self.task is None:
             return
@@ -104,9 +122,11 @@ class AvatarBridge:
             conn = await websockets.connect(self.url, open_timeout=3, max_size=None)
         except Exception as exc:
             self.failed = True
+            self.ready.set()
             logger.warning("avatar bridge %s: connect %s failed: %s", self.label, self.url, exc)
             return
         reader = asyncio.create_task(self._read(conn))
+        self.ready.set()
         logger.info("avatar bridge %s connected: %s", self.label, self.url)
         try:
             while True:

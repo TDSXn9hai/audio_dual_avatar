@@ -28,6 +28,17 @@ AVATAR_H264_PROFILE=main
 AVATAR_H264_LEVEL=4.0
 AVATAR_H264_CODEC_STRING=avc1.4D4028
 
+# Public single-session Avatar API (/v1/avatar/sessions).
+# Leave the key empty for same-origin/local deployments. When set, REST calls
+# must use Authorization: Bearer <key>; WebSocket access uses the short-lived
+# token returned by session creation.
+AVATAR_SESSION_API_KEY=
+AVATAR_SESSION_TTL_SECONDS=180
+AVATAR_SESSION_MAX_SECONDS=600
+# Comma-separated browser origins allowed to call the public session API.
+# Leave empty for same-origin deployments.
+AVATAR_SESSION_ALLOWED_ORIGINS=
+
 # The 720p knowledge-sharing avatar is the default. To use the original avatar
 # cache as a fallback, uncomment this override.
 # MUSETALK_CONFIG=configs/streaming_duplex.yaml

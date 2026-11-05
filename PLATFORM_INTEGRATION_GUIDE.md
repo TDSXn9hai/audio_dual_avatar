@@ -53,7 +53,43 @@ Gateway 的音频旁路：
 
 ## 2. 推荐接入方式
 
-### 2.1 方式一：iframe 嵌入 `/avatar`（推荐第一阶段）
+### 2.1 方式一：单连接 Avatar Session API（推荐）
+
+公共入口只有：
+
+```text
+POST /v1/avatar/sessions
+WSS  /v1/avatar/sessions/{session_id}/stream?token=...
+```
+
+```http
+POST /v1/avatar/sessions
+Authorization: Bearer <api_key>
+Content-Type: application/json
+
+{"preset_id":"knowledge_host_720p","metadata":{"user_id":"u_123"}}
+```
+
+返回的 `stream_url` 同时传输控制 JSON、文字、WAV 音频和数字人视频帧。
+平台不需要再连接 `/ws/live`、请求 WAV 或直接操作 MuseTalk。
+
+浏览器应优先使用：
+
+```js
+import { AvatarSessionClient } from '/static/sdk/avatar-session-client.js';
+
+const client = new AvatarSessionClient({
+  canvas,
+  presetId: 'knowledge_host_720p',
+});
+await client.connect();
+await client.startMicrophone();
+```
+
+SDK 内部负责音频采集、H.264/WebP 解码、音画同步、ACK、打断与清理。
+可访问 `/avatar-v2` 查看完整示例。
+
+### 2.2 方式二：iframe 嵌入 `/avatar`
 
 平台页面嵌入：
 
@@ -84,7 +120,9 @@ allow="microphone; camera; autoplay; fullscreen"
 - 页面使用自身默认提示词，也允许用户在页面内修改。
 - 平台登录态不会自动传给数字人服务，需要反向代理或后续增加 Token 机制。
 
-### 2.2 方式二：平台自研前端直接使用 WebSocket 协议
+以下旧接入方式仍保留用于调试和兼容。
+
+### 2.3 方式三：平台自研前端直接使用内部 WebSocket 协议
 
 适合需要完全控制 UI、消息记录、角色设置和平台业务状态的场景。
 
@@ -105,7 +143,7 @@ allow="microphone; camera; autoplay; fullscreen"
 - `minicpm_demo/static/avatar/avatar-player.js`
 - `minicpm_demo/static/avatar/speech-interruptor.js`
 
-### 2.3 方式三：平台后端代理 WebSocket
+### 2.4 方式四：平台后端代理 WebSocket
 
 平台后端可以作为 WebSocket 代理，统一做鉴权、审计和多实例路由：
 

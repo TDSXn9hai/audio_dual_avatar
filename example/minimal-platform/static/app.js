@@ -1,0 +1,214 @@
+import { AvatarSessionClient } from './avatar-session-client.js?v=minimal-platform1';
+
+
+const $ = (id) => document.getElementById(id);
+const API_PREFIX = '/api/avatar';
+const MIC_STORAGE_KEY = 'avatar.ui.micDevice';
+
+let client = null;
+let starting = false;
+let muted = false;
+let responseElement = null;
+
+
+function setStatus(text) {
+    $('status').textContent = text;
+}
+
+
+function setHint(text) {
+    $('hint').textContent = text;
+}
+
+
+function updateControls() {
+    const running = Boolean(client);
+    $('start').disabled = starting || running;
+    $('interrupt').disabled = !running;
+    $('mute').disabled = !running;
+    $('stop').disabled = !running;
+    $('preset').disabled = starting || running;
+    $('micDevice').disabled = starting || running;
+    $('refreshDevices').disabled = starting || running;
+    $('mute').textContent = muted ? '取消静音' : '静音';
+}
+
+
+function appendTranscript(text) {
+    if (!text) return;
+    if (!responseElement) {
+        responseElement = document.createElement('div');
+        responseElement.className = 'message';
+        $('transcript').append(responseElement);
+    }
+    responseElement.textContent += text;
+    $('transcript').scrollTop = $('transcript').scrollHeight;
+}
+
+
+async function loadPresets() {
+    const data = await AvatarSessionClient.listPresets({
+        baseUrl: location.origin,
+        apiPrefix: API_PREFIX,
+    });
+    $('preset').replaceChildren();
+    for (const preset of data.presets || []) {
+        if (!preset.available) continue;
+        $('preset').add(new Option(preset.name, preset.id));
+    }
+    if (data.default_preset_id) $('preset').value = data.default_preset_id;
+}
+
+
+async function loadMicrophones({ requestPermission = false } = {}) {
+    if (requestPermission) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: false,
+        });
+        for (const track of stream.getTracks()) track.stop();
+    }
+    const saved = localStorage.getItem(MIC_STORAGE_KEY) || '';
+    const current = $('micDevice').value || saved;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    $('micDevice').replaceChildren(new Option('系统默认麦克风', ''));
+    let index = 0;
+    for (const device of devices) {
+        if (device.kind !== 'audioinput' || !device.deviceId) continue;
+        if (device.deviceId === 'default') continue;
+        index += 1;
+        $('micDevice').add(
+            new Option(device.label || `麦克风 ${index}`, device.deviceId),
+        );
+    }
+    if (
+        current
+        && [...$('micDevice').options].some(
+            (option) => option.value === current,
+        )
+    ) {
+        $('micDevice').value = current;
+    } else if (current) {
+        $('micDevice').add(
+            new Option('已保存的麦克风（等待授权）', current),
+        );
+        $('micDevice').value = current;
+    }
+}
+
+
+async function start() {
+    if (starting || client) return;
+    starting = true;
+    responseElement = null;
+    updateControls();
+    setStatus('创建会话…');
+    setHint('正在通过平台 BFF 创建数字人会话');
+
+    const instance = new AvatarSessionClient({
+        canvas: $('avatarCanvas'),
+        baseUrl: location.origin,
+        apiPrefix: API_PREFIX,
+        presetId: $('preset').value,
+        microphoneDeviceId: $('micDevice').value,
+    });
+    client = instance;
+    instance.on('ready', (message) => {
+        setStatus(`已连接 · ${message.video_codec}`);
+        setHint('麦克风已开启，可以开始对话');
+    });
+    instance.on('microphoneReady', (info) => {
+        const label = info?.label ? `（${info.label}）` : '';
+        setHint(`麦克风已授权${label}`);
+        loadMicrophones().catch(() => {});
+    });
+    instance.on('microphoneLevel', ({ rms, sourceRms }) => {
+        if (sourceRms > 0.01) setStatus('正在收音');
+        else if (rms === 0 && sourceRms > 0.001) {
+            setStatus('麦克风有输入，但采集节点输出为静音');
+        }
+    });
+    instance.on('audioAccepted', ({ rms }) => {
+        setStatus(
+            Number(rms) < 0.002
+                ? '服务器收到静音，请检查麦克风'
+                : '服务器已收到音频',
+        );
+    });
+    instance.on('transcript', ({ text }) => appendTranscript(text));
+    instance.on('responseStarted', () => {
+        responseElement = null;
+    });
+    instance.on('responseEnded', () => {
+        responseElement = null;
+    });
+    instance.on('interrupted', () => {
+        responseElement = null;
+        setStatus('已打断');
+    });
+    instance.on('error', (error) => {
+        console.error(error);
+        setStatus('会话异常');
+        setHint(error?.message || '会话异常');
+    });
+    instance.on('closed', ({ reason } = {}) => {
+        if (client !== instance) return;
+        client = null;
+        starting = false;
+        setStatus('已断开');
+        setHint(`会话结束：${reason || 'closed'}`);
+        updateControls();
+    });
+
+    try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error('当前页面不是安全上下文，无法访问麦克风');
+        }
+        const selectedMic = $('micDevice').value;
+        if (selectedMic) localStorage.setItem(MIC_STORAGE_KEY, selectedMic);
+        await instance.prepareMicrophone();
+        await instance.connect();
+        await instance.startMicrophone();
+        starting = false;
+        updateControls();
+    } catch (error) {
+        console.error(error);
+        instance.close();
+        client = null;
+        starting = false;
+        setStatus('启动失败');
+        setHint(error?.message || '启动失败');
+        updateControls();
+    }
+}
+
+
+$('start').addEventListener('click', start);
+$('interrupt').addEventListener('click', () => client?.interrupt());
+$('mute').addEventListener('click', () => {
+    if (!client) return;
+    muted = !muted;
+    client.mute(muted);
+    updateControls();
+});
+$('stop').addEventListener('click', () => client?.close());
+$('micDevice').addEventListener('change', () => {
+    localStorage.setItem(MIC_STORAGE_KEY, $('micDevice').value);
+});
+$('refreshDevices').addEventListener('click', () => {
+    loadMicrophones({ requestPermission: true }).catch((error) => {
+        setHint(error?.message || '麦克风列表刷新失败');
+    });
+});
+window.addEventListener('pagehide', () => client?.close());
+
+
+updateControls();
+Promise.all([
+    loadPresets(),
+    loadMicrophones(),
+]).catch((error) => {
+    console.error(error);
+    setStatus('初始化失败');
+    setHint(error?.message || '初始化失败');
+});

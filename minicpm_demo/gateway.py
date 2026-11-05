@@ -33,6 +33,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, Response, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from gateway_modules.models import (
@@ -53,6 +54,10 @@ from gateway_modules.avatar_bridge import (
 from gateway_modules.avatar_presets import (
     AvatarPresetError,
     AvatarPresetRegistry,
+)
+from gateway_modules.avatar_session_api import (
+    AvatarSessionError,
+    AvatarSessionService,
 )
 from gateway_modules.ref_audio_registry import (
     RefAudioRegistry,
@@ -138,6 +143,7 @@ def _identity_dict(
 worker_pool: Optional[WorkerPool] = None
 ref_audio_registry: Optional[RefAudioRegistry] = None
 avatar_preset_registry: Optional[AvatarPresetRegistry] = None
+avatar_session_service: Optional[AvatarSessionService] = None
 app_registry: AppRegistry = AppRegistry()
 
 # 配置（通过 main() 传入）
@@ -152,7 +158,8 @@ _cleanup_task: Optional[asyncio.Task] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
-    global worker_pool, ref_audio_registry, avatar_preset_registry, _cleanup_task
+    global worker_pool, ref_audio_registry, avatar_preset_registry
+    global avatar_session_service, _cleanup_task
 
     workers = GATEWAY_CONFIG.get("workers", [])
     max_queue = GATEWAY_CONFIG.get("max_queue_size", 1000)
@@ -179,6 +186,24 @@ async def lifespan(app: FastAPI):
         project_root=_BASE_DIR,
         config_path="assets/avatar_presets.yaml",
     )
+    bridge_url = avatar_bridge_url()
+    http_url = avatar_http_url()
+    if bridge_url and http_url:
+        avatar_session_service = AvatarSessionService(
+            worker_pool=worker_pool,
+            preset_registry=avatar_preset_registry,
+            bridge_url=bridge_url,
+            avatar_http_url=http_url,
+            api_key=os.getenv("AVATAR_SESSION_API_KEY", ""),
+            ttl_seconds=float(
+                os.getenv("AVATAR_SESSION_TTL_SECONDS", "180")
+            ),
+            max_session_seconds=float(
+                os.getenv("AVATAR_SESSION_MAX_SECONDS", "600")
+            ),
+        )
+    else:
+        avatar_session_service = None
 
     # 启动 session 清理后台任务（每天一次）
     _cleanup_task = asyncio.create_task(_session_cleanup_loop())
@@ -190,6 +215,7 @@ async def lifespan(app: FastAPI):
     if _cleanup_task:
         _cleanup_task.cancel()
     await worker_pool.stop()
+    avatar_session_service = None
     logger.info("Gateway stopped")
 
 
@@ -235,6 +261,19 @@ internal_app = FastAPI(
 
 # Compress page assets and JSON without buffering WebSocket streams.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+_avatar_cors_origins = [
+    value.strip()
+    for value in os.getenv("AVATAR_SESSION_ALLOWED_ORIGINS", "").split(",")
+    if value.strip()
+]
+if _avatar_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_avatar_cors_origins,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        allow_credentials=False,
+    )
 
 _PUBLIC_ADMIN_ENABLED = os.getenv("ENABLE_PUBLIC_ADMIN", "").lower() in {"1", "true", "yes", "on"}
 _BLOCKED_ADMIN_PATHS = {"/admin", "/admin/"}
@@ -1376,6 +1415,91 @@ async def avatar_page():
         fallback = "/omni" if app_registry.is_enabled("omni") else "/"
         return RedirectResponse(url=fallback, status_code=302)
     return FileResponse(os.path.join(static_dir, "avatar", "avatar.html"))
+
+
+@app.get("/avatar-v2", response_class=HTMLResponse)
+async def avatar_v2_page():
+    """Single-WebSocket avatar API demo page."""
+    if not app_registry.is_enabled("avatar") or avatar_session_service is None:
+        fallback = "/avatar" if app_registry.is_enabled("avatar") else "/"
+        return RedirectResponse(url=fallback, status_code=302)
+    return FileResponse(os.path.join(static_dir, "avatar-v2", "index.html"))
+
+
+def _avatar_session_service_or_503() -> AvatarSessionService:
+    if avatar_session_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "avatar_session_not_configured",
+                "message": "AVATAR_BRIDGE_URL and AVATAR_HTTP_URL are required",
+            },
+        )
+    return avatar_session_service
+
+
+def _request_api_key(request: Request) -> Optional[str]:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return request.headers.get("x-api-key")
+
+
+@app.get("/v1/avatar/presets")
+async def public_avatar_presets(request: Request):
+    """List avatar presets through the public session API."""
+    service = _avatar_session_service_or_503()
+    try:
+        service.require_api_key(_request_api_key(request))
+        return await service.list_presets()
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.post("/v1/avatar/sessions", status_code=201)
+async def create_avatar_session(request: Request):
+    """Create one public avatar session and return its stream URL."""
+    service = _avatar_session_service_or_503()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_json", "message": str(exc)},
+        ) from exc
+    try:
+        service.require_api_key(_request_api_key(request))
+        return await service.create_session(payload)
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.websocket("/v1/avatar/sessions/{session_id}/stream")
+async def avatar_session_stream(websocket: WebSocket, session_id: str):
+    """Single-WebSocket transport for public avatar sessions."""
+    service = avatar_session_service
+    if service is None:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "code": "avatar_session_not_configured",
+                "message": "Avatar session API is not configured",
+            }
+        )
+        await websocket.close(code=1013)
+        return
+    await service.run_stream(
+        websocket,
+        session_id,
+        websocket.query_params.get("token", ""),
+    )
 
 
 @app.get("/avatar-live/api/status")

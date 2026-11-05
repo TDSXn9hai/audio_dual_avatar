@@ -164,6 +164,55 @@ YAML 支持热加载，修改后不需要重启 Gateway。
 `audio.avatar_ref_audio_path`。`/omni` 页面及其预设仍使用全局默认音色配置
 `audio.ref_audio_path`。
 
+### 单连接 Avatar Session API
+
+`/avatar-v2` 展示新的公共会话 API。业务调用方只需要一个服务地址：
+
+```http
+POST /v1/avatar/sessions
+WSS  /v1/avatar/sessions/{session_id}/stream?token=...
+```
+
+创建请求可以只指定预设：
+
+```json
+{
+  "preset_id": "knowledge_host_720p",
+  "metadata": {"user_id": "demo"}
+}
+```
+
+服务端完成形象激活、提示词/声线解析、Worker 分配、MiniCPM 会话和
+MuseTalk viewer 编排。返回的 WebSocket 同时承载：
+
+- JSON 控制、文字和状态事件；
+- `MTA1` 二进制 WAV 片段；
+- `MTH1`/`MTF1` 二进制视频帧。
+
+浏览器端可以复用
+[`avatar-session-client.js`](minicpm_demo/static/sdk/avatar-session-client.js)：
+
+```js
+const client = new AvatarSessionClient({
+  canvas: document.querySelector('canvas'),
+  presetId: 'knowledge_host_720p',
+});
+await client.connect();
+await client.startMicrophone();
+client.interrupt();
+client.close();
+```
+
+SDK 负责麦克风采集、WebCodecs/WebP 解码、音画同步、ACK、打断和资源清理。
+如配置 `AVATAR_SESSION_API_KEY`，REST 请求使用
+`Authorization: Bearer <key>`；WebSocket 使用创建会话时返回的短期 token。
+非浏览器客户端可参考
+[`avatar_session_api_client.py`](minicpm_demo/examples/avatar_session_api_client.py)。
+完整字段和二进制协议见
+[`AVATAR_SESSION_API.md`](AVATAR_SESSION_API.md)。
+跨机器平台接入的最小 BFF/静态代理示例见
+[`example/minimal-platform`](example/minimal-platform/README.md)。
+
 ### H.264 数字人视频流
 
 实时 viewer 现在默认使用 ffmpeg/libx264 编码的 H.264 Annex-B 视频流。浏览器通过

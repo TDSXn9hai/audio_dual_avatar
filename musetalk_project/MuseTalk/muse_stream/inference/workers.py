@@ -81,6 +81,21 @@ def get_blocking(
                 return None
 
 
+def wait_for_flush_control(
+    state: AppState,
+    flush_seq: int,
+    stop: threading.Event,
+) -> bool:
+    """Wait until the viewer has received the matching flush control."""
+    while not stop.is_set():
+        with state.pipeline.lock:
+            sent_seq = state.pipeline.flush_sent_seq
+        if sent_seq >= flush_seq:
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def live_infer_worker(
     state: AppState,
     raw_queue: asyncio.Queue,
@@ -504,6 +519,7 @@ def live_encode_worker(
                         pts_us,
                         frame_index,
                         packet,
+                        frame_flush_seq,
                     ),
                     stop,
                 ):
@@ -589,6 +605,14 @@ def live_encode_worker(
             with state.pipeline.lock:
                 current_flush_seq = state.pipeline.flush_seq
             if use_h264 and current_flush_seq != encoder_flush_seq:
+                if not wait_for_flush_control(
+                    state,
+                    current_flush_seq,
+                    stop,
+                ):
+                    return
+                with state.pipeline.lock:
+                    current_flush_seq = state.pipeline.flush_seq
                 assert h264_encoder is not None
                 h264_encoder.close()
                 h264_encoder = create_h264_encoder()
@@ -598,6 +622,15 @@ def live_encode_worker(
                     f"seq={encoder_flush_seq}"
                 )
             kind = item[0]
+            if kind == "raw":
+                segment_id = item[2]
+                with state.pipeline.lock:
+                    canceled = segment_id in state.pipeline.canceled_ids
+                if canceled:
+                    # A frame dequeued before flush may still be in flight
+                    # here. Feeding it to the new encoder would consume the
+                    # post-flush IDR for a segment the viewer must discard.
+                    continue
             if kind in ("segment", "segment_end", "error"):
                 if not put_ordered(None, ("control", item)):
                     return

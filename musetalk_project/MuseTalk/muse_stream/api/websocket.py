@@ -157,8 +157,12 @@ class LiveStreamSession:
         state.viewer.connect_time = time.monotonic()
         state.viewer.playback_started = False
         state.viewer.last_ack_time = time.monotonic()
-        state.pipeline.ack_frame = -1
-        state.pipeline.media_ack_frame = -1
+        with state.pipeline.lock:
+            state.pipeline.ack_frame = -1
+            state.pipeline.media_ack_frame = -1
+            # A new viewer has no decoder state to reset, so any flush that
+            # happened while nobody was watching is already satisfied.
+            state.pipeline.flush_sent_seq = state.pipeline.flush_seq
         self.max_prefetch_frames = max(
             state.model.prebuffer,
             int(state.model.fps * args.max_prefetch_seconds),
@@ -283,6 +287,7 @@ class LiveStreamSession:
                     pts_us,
                     frame_index,
                     packet,
+                    frame_flush_seq,
                 ) = item
                 if segment_id in state.pipeline.canceled_ids:
                     continue
@@ -306,10 +311,15 @@ class LiveStreamSession:
                         pass
                     if state.service.exit_requested or self.viewer_gone.is_set():
                         break
+                # A flush can arrive while this coroutine is waiting for queue
+                # credit. Emit its control message before considering the
+                # dequeued frame, then discard frames from the old epoch.
+                await self._send_controls()
                 if (
                     state.service.exit_requested
                     or self.viewer_gone.is_set()
                     or segment_id in state.pipeline.canceled_ids
+                    or frame_flush_seq != self.flush_seq
                 ):
                     continue
                 await self.websocket.send_bytes(packet)
@@ -363,6 +373,7 @@ class LiveStreamSession:
 
     async def _send_controls(self) -> None:
         state = self.state
+        sent_flush_seq: int | None = None
         if state.pipeline.flush_seq != self.flush_seq:
             self.flush_seq = state.pipeline.flush_seq
             flush_frame = state.pipeline.flush_frame
@@ -372,9 +383,17 @@ class LiveStreamSession:
             self.control_messages.append(
                 {"type": "flush", "frame_index": flush_frame}
             )
+            sent_flush_seq = self.flush_seq
             self.credit_event.set()
         while self.control_messages:
-            await self.websocket.send_json(self.control_messages.pop(0))
+            message = self.control_messages.pop(0)
+            await self.websocket.send_json(message)
+            if message.get("type") == "flush" and sent_flush_seq is not None:
+                with state.pipeline.lock:
+                    state.pipeline.flush_sent_seq = max(
+                        state.pipeline.flush_sent_seq,
+                        sent_flush_seq,
+                    )
 
     async def _ack_reader(self) -> None:
         state = self.state
