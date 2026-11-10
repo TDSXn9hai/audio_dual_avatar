@@ -71,6 +71,7 @@ def test_repository_avatar_presets_are_config_driven() -> None:
     assert current["prompt"]["sha256"]
     assert current["source"] == "system"
     assert current["deletable"] is False
+    assert current["active"] is True
 
     assert classic["available"]
     assert classic["cache"]["width"] == 480

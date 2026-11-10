@@ -159,6 +159,10 @@ def test_avatar_preset_delete_routes_and_frontends_are_wired():
     assert "deleteAvatarPreset" in avatar_app
     assert "deleteSelectedPreset" in avatar_v2_app
     assert "static async deletePreset" in sdk
+    assert "switch_to_default=true" in avatar_app
+    assert "preset.active" in avatar_v2_app
+    assert "switchToDefault" in avatar_v2_app
+    assert "searchParams.set('switch_to_default', 'true')" in sdk
     add_avatar = (DEMO_ROOT.parent / "add_avatar.sh").read_text()
     assert 'PRESET_SOURCE="user"' in add_avatar
     assert '"source": preset_source' in add_avatar

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import wave
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+import gateway_modules.avatar_preset_admin as preset_admin_module
 from gateway_modules.avatar_preset_admin import (
     AvatarPresetAdminService,
     AvatarPresetDeleteError,
 )
+from gateway_modules.avatar_presets import AvatarPresetRegistry
 
 
 def _write_yaml(path: Path, payload: dict) -> None:
@@ -57,6 +60,17 @@ def _resource(root: Path, relative: str, data: bytes = b"x") -> Path:
     return path
 
 
+def _wav_resource(root: Path, relative: str) -> Path:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16000)
+        stream.writeframes(b"\x00\x00" * 1600)
+    return path
+
+
 def _cache(root: Path, avatar_id: str, video_relative: str) -> Path:
     path = root / "musetalk_project/MuseTalk/results/v15/avatars" / avatar_id
     path.mkdir(parents=True)
@@ -94,7 +108,7 @@ def _minimal_project(tmp_path: Path) -> AvatarPresetAdminService:
         voice_ref="assets/ref_audio/system.wav",
         prompt_file="assets/prompts/avatar/system.txt",
     )
-    _resource(tmp_path, "minicpm_demo/assets/ref_audio/system.wav")
+    _wav_resource(tmp_path, "minicpm_demo/assets/ref_audio/system.wav")
     _resource(tmp_path, "minicpm_demo/assets/prompts/avatar/system.txt")
     _resource(tmp_path, "musetalk_project/MuseTalk/data/video/system_avatar.mp4")
     _cache(
@@ -122,6 +136,37 @@ def _minimal_project(tmp_path: Path) -> AvatarPresetAdminService:
         project_root=tmp_path,
         avatar_http_url="",
     )
+
+
+def _gateway_registry(
+    manager: AvatarPresetAdminService,
+) -> AvatarPresetRegistry:
+    return AvatarPresetRegistry(
+        manager.minicpm_root,
+        runtime_config_path=manager.runtime_config_path,
+    )
+
+
+def _avatar_status(active_avatar_id: str) -> dict:
+    return {
+        "active_avatar_id": active_avatar_id,
+        "avatars": [
+            {
+                "id": "system_avatar",
+                "valid": True,
+                "width": 768,
+                "height": 1344,
+                "frame_count": 690,
+            },
+            {
+                "id": "user_avatar",
+                "valid": True,
+                "width": 1088,
+                "height": 1920,
+                "frame_count": 690,
+            },
+        ],
+    }
 
 
 def test_api_deletes_owner_created_preset_and_unique_files(tmp_path: Path) -> None:
@@ -376,7 +421,16 @@ def test_local_delete_endpoint_protects_system_preset(
         "avatar_preset_admin_service",
         manager,
     )
-    monkeypatch.setattr(gateway, "avatar_preset_registry", None)
+    monkeypatch.setattr(
+        gateway,
+        "avatar_preset_registry",
+        _gateway_registry(manager),
+    )
+
+    async def avatar_status(_base):
+        return _avatar_status("system_avatar")
+
+    monkeypatch.setattr(gateway, "_fetch_avatar_status", avatar_status)
     client = TestClient(gateway.app)
     try:
         response = client.delete(
@@ -447,7 +501,16 @@ def test_public_delete_endpoint_deletes_owned_user_preset(
         "avatar_session_service",
         SessionService(),
     )
-    monkeypatch.setattr(gateway, "avatar_preset_registry", None)
+    monkeypatch.setattr(
+        gateway,
+        "avatar_preset_registry",
+        _gateway_registry(manager),
+    )
+
+    async def avatar_status(_base):
+        return _avatar_status("system_avatar")
+
+    monkeypatch.setattr(gateway, "_fetch_avatar_status", avatar_status)
     client = TestClient(gateway.app)
     try:
         response = client.delete(
@@ -462,6 +525,107 @@ def test_public_delete_endpoint_deletes_owned_user_preset(
     assert response.status_code == 200
     assert response.json()["deleted"] is True
     assert response.json()["source"] == "user"
+
+
+def test_public_delete_active_preset_switches_to_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import gateway
+
+    manager = _minimal_project(tmp_path)
+    runtime = tmp_path / "minicpm_demo/data/avatar_customizations/avatar_presets.user.yaml"
+    _write_yaml(
+        runtime,
+        {
+            "version": 1,
+            "presets": {
+                "user_avatar": _preset(
+                    source="user",
+                    avatar_id="user_avatar",
+                    voice_ref="data/avatar_customizations/assets/ref_audio/user.wav",
+                    prompt_file="data/avatar_customizations/assets/prompts/avatar/user.txt",
+                    owner_id="user-a",
+                ),
+            },
+        },
+    )
+    _resource(
+        tmp_path,
+        "minicpm_demo/data/avatar_customizations/assets/ref_audio/user.wav",
+    )
+    _resource(
+        tmp_path,
+        "minicpm_demo/data/avatar_customizations/assets/prompts/avatar/user.txt",
+    )
+    _cache(
+        tmp_path,
+        "user_avatar",
+        "data/video/user_avatar.mp4",
+    )
+    _resource(
+        tmp_path,
+        "musetalk_project/MuseTalk/data/video/user_avatar.mp4",
+    )
+
+    class SessionService:
+        def require_api_key(self, supplied):
+            assert supplied == "secret"
+
+        async def is_preset_in_use(self, preset_id):
+            return False
+
+    state = {"active": "user_avatar"}
+    switched = []
+
+    async def avatar_status(_base):
+        return _avatar_status(state["active"])
+
+    async def switch_avatar(avatar_id):
+        switched.append(avatar_id)
+        state["active"] = avatar_id
+
+    monkeypatch.setattr(
+        gateway,
+        "avatar_preset_admin_service",
+        manager,
+    )
+    monkeypatch.setattr(
+        gateway,
+        "avatar_session_service",
+        SessionService(),
+    )
+    monkeypatch.setattr(
+        gateway,
+        "avatar_preset_registry",
+        _gateway_registry(manager),
+    )
+    monkeypatch.setattr(gateway, "_fetch_avatar_status", avatar_status)
+    monkeypatch.setattr(gateway, "_switch_avatar_for_delete", switch_avatar)
+    client = TestClient(gateway.app)
+    headers = {
+        "Authorization": "Bearer secret",
+        "X-Avatar-Owner-ID": "user-a",
+    }
+    try:
+        rejected = client.delete(
+            "/v1/avatar/presets/user_avatar",
+            headers=headers,
+        )
+        accepted = client.delete(
+            "/v1/avatar/presets/user_avatar?switch_to_default=true",
+            headers=headers,
+        )
+    finally:
+        client.close()
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "avatar_active"
+    assert rejected.json()["detail"]["can_switch_to_default"] is True
+    assert accepted.status_code == 200, accepted.json()
+    assert accepted.json()["switched_to_preset_id"] == "system_avatar"
+    assert accepted.json()["active_avatar_id"] == "system_avatar"
+    assert switched == ["system_avatar"]
 
 
 def test_unsafe_resource_path_is_rejected(tmp_path: Path) -> None:
@@ -526,4 +690,36 @@ def test_active_avatar_cannot_be_deleted(tmp_path: Path) -> None:
             owner_id="user-a",
             api_mode=True,
         )
+    assert exc.value.code == "avatar_in_use"
+
+
+def test_active_check_accepts_status_avatar_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = _minimal_project(tmp_path)
+    manager.avatar_http_url = "http://127.0.0.1:8000"
+    preset = AvatarPresetRegistry(manager.minicpm_root).get(
+        "system_avatar"
+    )
+
+    class Response:
+        def read(self):
+            return json.dumps(
+                {"avatar_id": "system_avatar"}
+            ).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        preset_admin_module,
+        "urlopen",
+        lambda *args, **kwargs: Response(),
+    )
+    with pytest.raises(AvatarPresetDeleteError) as exc:
+        manager._check_active(preset)
     assert exc.value.code == "avatar_in_use"

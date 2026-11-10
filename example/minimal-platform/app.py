@@ -205,6 +205,15 @@ def create_app(
         _require_configured(request)
         if not _PRESET_ID_RE.fullmatch(preset_id):
             return _local_error(400, "invalid_preset_id", "Invalid preset id")
+        switch_to_default = request.query_params.get(
+            "switch_to_default",
+            "",
+        ).lower() in {"1", "true", "yes", "on"}
+        params = (
+            {"switch_to_default": "true"}
+            if switch_to_default
+            else None
+        )
         try:
             response = await request.app.state.http_client.delete(
                 _upstream_url(
@@ -212,6 +221,7 @@ def create_app(
                     f"/v1/avatar/presets/{preset_id}",
                 ),
                 headers=_upstream_headers(configured),
+                params=params,
             )
         except Exception as exc:
             return _upstream_error(exc)

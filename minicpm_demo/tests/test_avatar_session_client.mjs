@@ -203,11 +203,12 @@ const deleted = await AvatarSessionClient.deletePreset({
     baseUrl: 'https://example.test',
     ownerId: 'user-a',
     presetId: 'up_123',
+    switchToDefault: true,
 });
 assert.equal(deleted.status, 'ready');
 assert.equal(
     customizationQuery.url,
-    'https://example.test/v1/avatar/presets/up_123',
+    'https://example.test/v1/avatar/presets/up_123?switch_to_default=true',
 );
 assert.equal(customizationQuery.options.method, 'DELETE');
 assert.equal(

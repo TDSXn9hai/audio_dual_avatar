@@ -1,6 +1,6 @@
 import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=h2641';
 import { SpeechInterruptor } from './speech-interruptor.js?v=prompt2';
-import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete1';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete2';
 import { RealtimeSession } from '../duplex/lib/realtime-session.js';
 import { arrayBufferToBase64, resampleAudio } from '../duplex/lib/duplex-utils.js';
 
@@ -190,12 +190,25 @@ async function deleteAvatarPreset(preset) {
     if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
         return;
     }
+    const switchToDefault = Boolean(preset.active);
+    if (
+        switchToDefault
+        && !window.confirm(
+            `该形象当前处于活跃状态。删除后将自动切换为系统默认形象。`
+            + `确认继续删除“${preset.name}”？`,
+        )
+    ) {
+        return;
+    }
     avatarPresetSwitching = true;
-    setAvatarPresetStatus('正在删除…');
+    setAvatarPresetStatus(
+        switchToDefault ? '正在切换默认形象…' : '正在删除…',
+    );
     updateControls();
     try {
         const response = await fetch(
-            `/avatar-live/api/avatar-presets/${encodeURIComponent(preset.id)}`,
+            `/avatar-live/api/avatar-presets/${encodeURIComponent(preset.id)}`
+                + (switchToDefault ? '?switch_to_default=true' : ''),
             {
                 method: 'DELETE',
                 headers: { 'X-Avatar-Owner-ID': avatarOwnerId },

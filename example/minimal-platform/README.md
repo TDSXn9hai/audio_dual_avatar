@@ -95,6 +95,10 @@ Authorization: Bearer <AVATAR_API_KEY>
 删除该 owner 的 `source: user` preset；系统 preset 和其他 owner 的 preset 会被
 拒绝，共享的音频、提示词、缓存和视频不会被删除。
 
+删除当前 active 形象时使用
+`DELETE /api/avatar/presets/{preset_id}?switch_to_default=true`。平台会将其转发给
+Gateway，由 Gateway 先切换系统默认形象，再删除用户 preset。
+
 形象视频和参考音频最长均为 20 秒。上传接口会把 multipart 请求流式转发给
 数字人 Gateway，不在平台服务器落盘；任务状态使用 `job_id` 轮询。生成的用户
 预设默认 `private`，只能由相同 `PLATFORM_AVATAR_OWNER_ID` 查询和创建会话。

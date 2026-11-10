@@ -313,6 +313,17 @@ X-Avatar-Owner-ID: <trusted-user-id>
 只有 `source: user` 且 `owner_id` 与请求 owner 一致的 preset 可以通过 API
 删除。系统 preset 返回 `403 system_preset_protected`。
 
+如果目标 preset 是当前 active avatar，普通删除返回 `409 avatar_active`。
+用户确认后可以显式要求先切换为系统默认形象，再删除：
+
+```http
+DELETE /v1/avatar/presets/{preset_id}?switch_to_default=true
+```
+
+切换默认由 Gateway 调用 MuseTalk 完成；默认形象加载或切换失败时不会删除
+preset 或资源。成功响应包含 `switched_to_preset_id`、`switched_avatar_id`
+和当前 `active_avatar_id`。
+
 删除时会检查参考音频、提示词、逐帧缓存和基底视频是否仍被其他 preset
 使用。共享文件会保留，独占文件才会删除。相关资源使用情况包括已禁用和
 其他 owner 的 preset。

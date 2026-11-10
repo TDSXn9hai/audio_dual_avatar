@@ -462,7 +462,11 @@ class AvatarPresetAdminService:
                 status = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             return [f"Could not verify active avatar state: {exc}"]
-        active_id = str(status.get("active_avatar_id") or "")
+        active_id = str(
+            status.get("active_avatar_id")
+            or status.get("avatar_id")
+            or ""
+        )
         if active_id == preset.avatar_id:
             raise AvatarPresetDeleteError(
                 "Avatar preset is currently active",

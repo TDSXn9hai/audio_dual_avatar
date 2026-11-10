@@ -165,6 +165,7 @@ avatar_preset_registry: Optional[AvatarPresetRegistry] = None
 avatar_session_service: Optional[AvatarSessionService] = None
 avatar_customization_service: Optional[AvatarCustomizationService] = None
 avatar_preset_admin_service: Optional[AvatarPresetAdminService] = None
+_avatar_preset_delete_lock = asyncio.Lock()
 app_registry: AppRegistry = AppRegistry()
 
 # 配置（通过 main() 传入）
@@ -1610,54 +1611,235 @@ async def _delete_avatar_preset(
     request: Request,
     *,
     require_api_key: bool,
+    switch_to_default: bool,
 ) -> Dict[str, Any]:
-    admin = _avatar_preset_admin_or_503()
-    session_service = avatar_session_service
-    if require_api_key:
-        session_service = _avatar_session_service_or_503()
+    async with _avatar_preset_delete_lock:
+        admin = _avatar_preset_admin_or_503()
+        registry = _avatar_preset_or_503()
+        session_service = avatar_session_service
+        if require_api_key:
+            session_service = _avatar_session_service_or_503()
+            try:
+                session_service.require_api_key(_request_api_key(request))
+            except AvatarSessionError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={"code": exc.code, "message": str(exc)},
+                ) from exc
+        if (
+            session_service is not None
+            and await session_service.is_preset_in_use(preset_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "avatar_in_use",
+                    "message": "Avatar preset is used by an active session",
+                },
+            )
+        owner_id = _customization_owner_id(request)
+        status = await _fetch_avatar_status(avatar_http_url())
         try:
-            session_service.require_api_key(_request_api_key(request))
-        except AvatarSessionError as exc:
+            target = await asyncio.to_thread(
+                registry.get,
+                preset_id,
+                owner_id,
+            )
+        except AvatarPresetError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={
+                    "code": "avatar_preset_unavailable",
+                    "message": str(exc),
+                },
+            ) from exc
+        if target.source != "user":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "system_preset_protected",
+                    "message": "System avatar presets cannot be deleted through the API",
+                },
+            )
+        if target.owner_id != owner_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "preset_not_found",
+                    "message": "Avatar preset not found",
+                },
+            )
+
+        active_avatar_id = str(
+            status.get("active_avatar_id") or ""
+        )
+        switched_to: Optional[Dict[str, Any]] = None
+        if active_avatar_id == target.avatar_id:
+            default_preset_id = (
+                await asyncio.to_thread(registry.load)
+            ).default_preset_id
+            if not switch_to_default:
+                try:
+                    fallback = await _resolve_delete_default_preset(
+                        registry,
+                        status,
+                        exclude_preset_id=preset_id,
+                        exclude_avatar_id=target.avatar_id,
+                    )
+                    default_preset_id = fallback["id"]
+                except HTTPException:
+                    pass
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "avatar_active",
+                        "message": "Avatar preset is currently active",
+                        "active_avatar_id": active_avatar_id,
+                        "default_preset_id": default_preset_id,
+                        "can_switch_to_default": True,
+                    },
+                )
+            switched_to = await _resolve_delete_default_preset(
+                registry,
+                status,
+                exclude_preset_id=preset_id,
+                exclude_avatar_id=target.avatar_id,
+            )
+            await _switch_avatar_for_delete(switched_to["avatar_id"])
+
+        try:
+            result = await asyncio.to_thread(
+                admin.delete,
+                preset_id,
+                owner_id=owner_id,
+                api_mode=True,
+            )
+        except AvatarPresetDeleteError as exc:
             raise HTTPException(
                 status_code=exc.status_code,
                 detail={"code": exc.code, "message": str(exc)},
             ) from exc
-    if (
-        session_service is not None
-        and await session_service.is_preset_in_use(preset_id)
-    ):
+        registry.invalidate()
+        public = _public_preset_delete_result(result)
+        public.update(
+            {
+                "switched_to_preset_id": (
+                    switched_to["id"] if switched_to else None
+                ),
+                "switched_avatar_id": (
+                    switched_to["avatar_id"] if switched_to else None
+                ),
+                "active_avatar_id": (
+                    switched_to["avatar_id"]
+                    if switched_to
+                    else active_avatar_id or None
+                ),
+                "requires_preset_selection": False,
+            }
+        )
+        return public
+
+
+async def _resolve_delete_default_preset(
+    registry: AvatarPresetRegistry,
+    avatar_status: Dict[str, Any],
+    *,
+    exclude_preset_id: str,
+    exclude_avatar_id: str,
+) -> Dict[str, Any]:
+    config = await asyncio.to_thread(registry.load)
+    by_id = {preset.id: preset for preset in config.presets}
+    candidates = []
+    default = by_id.get(config.default_preset_id)
+    if default is not None:
+        candidates.append(default)
+    candidates.extend(
+        preset
+        for preset in config.presets
+        if preset.source == "system" and preset is not default
+    )
+    for preset in candidates:
+        if (
+            not preset.enabled
+            or preset.source != "system"
+            or preset.id == exclude_preset_id
+            or preset.avatar_id == exclude_avatar_id
+        ):
+            continue
+        try:
+            return await asyncio.to_thread(
+                registry.public_item,
+                preset.id,
+                avatar_status,
+                None,
+            )
+        except AvatarPresetError:
+            continue
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "no_system_default_preset",
+            "message": "No available system preset can replace the active avatar",
+        },
+    )
+
+
+async def _switch_avatar_for_delete(avatar_id: str) -> None:
+    base = avatar_http_url()
+    if not base:
         raise HTTPException(
-            status_code=409,
+            status_code=503,
             detail={
-                "code": "avatar_in_use",
-                "message": "Avatar preset is used by an active session",
+                "code": "avatar_unavailable",
+                "message": "Avatar service URL is not configured",
             },
         )
-    owner_id = _customization_owner_id(request)
     try:
-        result = await asyncio.to_thread(
-            admin.delete,
-            preset_id,
-            owner_id=owner_id,
-            api_mode=True,
-        )
-    except AvatarPresetDeleteError as exc:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{base}/api/avatar/select",
+                json={"avatar_id": avatar_id},
+            )
+    except httpx.HTTPError as exc:
         raise HTTPException(
-            status_code=exc.status_code,
-            detail={"code": exc.code, "message": str(exc)},
+            status_code=502,
+            detail={
+                "code": "avatar_switch_failed",
+                "message": f"Failed to switch to default avatar: {exc}",
+            },
         ) from exc
-    if avatar_preset_registry is not None:
-        avatar_preset_registry.invalidate()
-    return _public_preset_delete_result(result)
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail")
+        except Exception:
+            detail = response.text[:300]
+        raise HTTPException(
+            status_code=(
+                response.status_code
+                if 400 <= response.status_code < 500
+                else 502
+            ),
+            detail={
+                "code": "avatar_switch_failed",
+                "message": str(
+                    detail or f"avatar service returned {response.status_code}"
+                ),
+            },
+        )
 
 
 @app.delete("/v1/avatar/presets/{preset_id}")
-async def delete_public_avatar_preset(preset_id: str, request: Request):
+async def delete_public_avatar_preset(
+    preset_id: str,
+    request: Request,
+    switch_to_default: bool = False,
+):
     """Delete one owner-created preset through the public API."""
     return await _delete_avatar_preset(
         preset_id,
         request,
         require_api_key=True,
+        switch_to_default=switch_to_default,
     )
 
 
@@ -1899,12 +2081,17 @@ async def avatar_preset_list(request: Request):
 
 
 @app.delete("/avatar-live/api/avatar-presets/{preset_id}")
-async def avatar_preset_delete(preset_id: str, request: Request):
+async def avatar_preset_delete(
+    preset_id: str,
+    request: Request,
+    switch_to_default: bool = False,
+):
     """Delete an owner-created preset from the same-origin avatar page."""
     return await _delete_avatar_preset(
         preset_id,
         request,
         require_api_key=False,
+        switch_to_default=switch_to_default,
     )
 
 

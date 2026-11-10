@@ -1,4 +1,4 @@
-import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete1';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete2';
 
 
 const $ = (id) => document.getElementById(id);
@@ -181,14 +181,49 @@ async function deleteSelectedPreset() {
     if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
         return;
     }
+    let switchToDefault = Boolean(preset.active);
+    if (
+        switchToDefault
+        && !window.confirm(
+            `该形象当前处于活跃状态。删除后将自动切换为系统默认形象。`
+            + `确认继续删除“${preset.name}”？`,
+        )
+    ) {
+        return;
+    }
     $('deletePreset').disabled = true;
-    setHint('正在删除自建形象…');
+    setHint(
+        switchToDefault
+            ? '正在切换默认形象并删除自建形象…'
+            : '正在删除自建形象…',
+    );
     try {
-        await AvatarSessionClient.deletePreset({
-            baseUrl: location.origin,
-            ownerId,
-            presetId: preset.id,
-        });
+        try {
+            await AvatarSessionClient.deletePreset({
+                baseUrl: location.origin,
+                ownerId,
+                presetId: preset.id,
+                switchToDefault,
+            });
+        } catch (error) {
+            if (error?.code !== 'avatar_active' || switchToDefault) {
+                throw error;
+            }
+            if (!window.confirm(
+                `该形象当前处于活跃状态。删除后将自动切换为系统默认形象。`
+                + `确认继续删除“${preset.name}”？`,
+            )) {
+                return;
+            }
+            switchToDefault = true;
+            setHint('正在切换默认形象并删除自建形象…');
+            await AvatarSessionClient.deletePreset({
+                baseUrl: location.origin,
+                ownerId,
+                presetId: preset.id,
+                switchToDefault: true,
+            });
+        }
         await loadPresets();
         setHint(`已删除自建形象：${preset.name}`);
     } catch (error) {

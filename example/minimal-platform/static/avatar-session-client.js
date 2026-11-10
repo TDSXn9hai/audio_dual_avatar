@@ -101,12 +101,17 @@ export class AvatarSessionClient {
         apiPrefix = '/v1/avatar',
         ownerId = '',
         presetId,
+        switchToDefault = false,
     }) {
+        const url = new URL(
+            `${apiPrefix.replace(/\/$/, '')}/presets/${encodeURIComponent(presetId)}`,
+            baseUrl || location.origin,
+        );
+        if (switchToDefault) {
+            url.searchParams.set('switch_to_default', 'true');
+        }
         const response = await fetch(
-            new URL(
-                `${apiPrefix.replace(/\/$/, '')}/presets/${encodeURIComponent(presetId)}`,
-                baseUrl || location.origin,
-            ),
+            url,
             {
                 method: 'DELETE',
                 headers: {

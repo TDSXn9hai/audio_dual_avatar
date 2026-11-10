@@ -1,4 +1,4 @@
-import { AvatarSessionClient } from './avatar-session-client.js?v=avatar-delete1';
+import { AvatarSessionClient } from './avatar-session-client.js?v=avatar-delete2';
 
 
 const $ = (id) => document.getElementById(id);
@@ -170,13 +170,28 @@ async function deleteSelectedPreset() {
     if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
         return;
     }
+    const switchToDefault = Boolean(preset.active);
+    if (
+        switchToDefault
+        && !window.confirm(
+            `该形象当前处于活跃状态。删除后将自动切换为系统默认形象。`
+            + `确认继续删除“${preset.name}”？`,
+        )
+    ) {
+        return;
+    }
     $('deletePreset').disabled = true;
-    setHint('正在删除自建形象…');
+    setHint(
+        switchToDefault
+            ? '正在切换默认形象并删除自建形象…'
+            : '正在删除自建形象…',
+    );
     try {
         await AvatarSessionClient.deletePreset({
             baseUrl: location.origin,
             apiPrefix: API_PREFIX,
             presetId: preset.id,
+            switchToDefault,
         });
         await loadPresets();
         setHint(`已删除自建形象：${preset.name}`);

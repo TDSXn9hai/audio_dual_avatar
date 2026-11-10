@@ -173,6 +173,10 @@ preset；管理员可以删除任意 preset：
 preset 共用的文件会保留。删除当前 default preset 时必须通过 `--new-default`
 指定替代 preset。
 
+用户通过前端删除自己正在使用的形象时，前端会二次确认，并在删除请求中发送
+`switch_to_default=true`。Gateway 先将 MuseTalk 切换到可用的系统默认形象，
+再删除用户 preset；默认切换失败时不会删除任何资源。
+
 `/avatar` 还会使用自己的默认参考音色
 `assets/ref_audio/ref_avatar_default.wav`，对应配置项
 `audio.avatar_ref_audio_path`。`/omni` 页面及其预设仍使用全局默认音色配置

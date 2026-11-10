@@ -285,6 +285,7 @@ class AvatarPresetRegistry:
                 preset,
                 cache_by_id.get(preset.avatar_id),
                 owner_id,
+                avatar_status.get("active_avatar_id"),
             )
             for preset in config.presets
             if preset.enabled
@@ -315,6 +316,7 @@ class AvatarPresetRegistry:
             preset,
             cache_by_id.get(preset.avatar_id),
             owner_id,
+            avatar_status.get("active_avatar_id"),
         )
         if not item["available"]:
             raise AvatarPresetError(
@@ -371,6 +373,7 @@ class AvatarPresetRegistry:
         preset: AvatarPresetSpec,
         cache: Optional[Dict[str, Any]],
         owner_id: Optional[str] = None,
+        active_avatar_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         errors: list[str] = []
         prompt_payload: Optional[Dict[str, Any]] = None
@@ -413,6 +416,7 @@ class AvatarPresetRegistry:
             "visibility": preset.visibility,
             "source": preset.source,
             "custom": preset.source == "user",
+            "active": preset.avatar_id == active_avatar_id,
             "deletable": (
                 preset.source == "user"
                 and bool(owner_id)

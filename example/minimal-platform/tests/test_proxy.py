@@ -81,6 +81,9 @@ def test_delete_preset_proxy_uses_server_owner_and_api_key() -> None:
         seen["path"] = request.url.path
         seen["authorization"] = request.headers.get("authorization")
         seen["owner"] = request.headers.get("x-avatar-owner-id")
+        seen["switch_to_default"] = request.url.params.get(
+            "switch_to_default"
+        )
         return httpx.Response(
             200,
             json={
@@ -93,7 +96,7 @@ def test_delete_preset_proxy_uses_server_owner_and_api_key() -> None:
     app = platform_app.create_app(_settings(), transport=httpx.MockTransport(handler))
     with TestClient(app) as client:
         response = client.delete(
-            "/api/avatar/presets/up_123",
+            "/api/avatar/presets/up_123?switch_to_default=true",
             headers={"X-Avatar-Owner-ID": "forged-browser-owner"},
         )
 
@@ -104,6 +107,7 @@ def test_delete_preset_proxy_uses_server_owner_and_api_key() -> None:
         "path": "/v1/avatar/presets/up_123",
         "authorization": "Bearer upstream-secret",
         "owner": "platform-demo",
+        "switch_to_default": "true",
     }
 
 
