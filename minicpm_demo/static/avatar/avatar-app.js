@@ -1,5 +1,6 @@
 import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=h2641';
 import { SpeechInterruptor } from './speech-interruptor.js?v=prompt2';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete1';
 import { RealtimeSession } from '../duplex/lib/realtime-session.js';
 import { arrayBufferToBase64, resampleAudio } from '../duplex/lib/duplex-utils.js';
 
@@ -13,7 +14,9 @@ const storage = {
     },
 };
 const AVATAR_PRESET_STORAGE_KEY = 'avatarPreset';
+const AVATAR_OWNER_STORAGE_KEY = 'avatar.ownerId';
 const avatarVoiceRefs = new Map();
+const avatarOwnerId = getAvatarOwnerId();
 
 let session = null;
 let microphone = null;
@@ -31,10 +34,24 @@ let modelSpeaking = false;
 let awaitingListen = false;
 let interruptRecoveryTimer = null;
 let avatarPresetSwitching = false;
+let avatarCustomizing = false;
 let avatarPresets = [];
 let avatarPresetsLoaded = false;
 let avatarPresetsError = '';
 let avatarPresetId = storage.get(AVATAR_PRESET_STORAGE_KEY, '');
+
+function getAvatarOwnerId() {
+    try {
+        const existing = localStorage.getItem(AVATAR_OWNER_STORAGE_KEY) || '';
+        if (existing) return existing;
+        const value = globalThis.crypto?.randomUUID?.()
+            || `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        localStorage.setItem(AVATAR_OWNER_STORAGE_KEY, value);
+        return value;
+    } catch {
+        return `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    }
+}
 
 function selectedAvatarPreset() {
     return avatarPresets.find((preset) => preset.id === avatarPresetId) || null;
@@ -65,6 +82,7 @@ async function loadAvatarVoiceRef(preset = selectedAvatarPreset()) {
     const response = await fetch(preset.voice.audio_url, {
         signal: AbortSignal.timeout(10000),
         cache: 'no-store',
+        headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
     });
     if (!response.ok) {
         throw new Error(`${preset.name}的参考声线加载失败`);
@@ -86,7 +104,10 @@ function setAvatarPresetStatus(text, state = '') {
 }
 
 function renderAvatarPresets() {
-    const busy = starting || Boolean(session?.running) || avatarPresetSwitching;
+    const busy = starting
+        || Boolean(session?.running)
+        || avatarPresetSwitching
+        || avatarCustomizing;
     const grid = $('avatarPresetGrid');
     grid.replaceChildren();
     if (!avatarPresetsLoaded) {
@@ -101,6 +122,8 @@ function renderAvatarPresets() {
         grid.append(empty);
     } else {
         for (const preset of avatarPresets) {
+            const card = document.createElement('div');
+            card.className = 'avatar-preset-card';
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'avatar-preset';
@@ -130,17 +153,93 @@ function renderAvatarPresets() {
                 button.append(error);
             }
             button.addEventListener('click', () => selectAvatarPreset(preset.id));
-            grid.append(button);
+            card.append(button);
+            if (preset.deletable) {
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'avatar-preset-delete';
+                remove.textContent = '删除';
+                remove.title = `删除自建形象：${preset.name}`;
+                remove.setAttribute(
+                    'aria-label',
+                    `删除自建形象：${preset.name}`,
+                );
+                remove.disabled = busy;
+                remove.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    deleteAvatarPreset(preset);
+                });
+                card.append(remove);
+            }
+            grid.append(card);
         }
     }
     $('btnRefreshAvatars').disabled = busy;
 }
+
+
+async function deleteAvatarPreset(preset) {
+    if (
+        starting
+        || avatarPresetSwitching
+        || avatarCustomizing
+        || session?.running
+    ) {
+        return;
+    }
+    if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
+        return;
+    }
+    avatarPresetSwitching = true;
+    setAvatarPresetStatus('正在删除…');
+    updateControls();
+    try {
+        const response = await fetch(
+            `/avatar-live/api/avatar-presets/${encodeURIComponent(preset.id)}`,
+            {
+                method: 'DELETE',
+                headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
+                signal: AbortSignal.timeout(60000),
+            },
+        );
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            // Keep the HTTP status as the error message.
+        }
+        if (!response.ok) {
+            const detail = data?.detail;
+            const message = typeof detail === 'object'
+                ? detail?.message
+                : detail;
+            throw new Error(message || `HTTP ${response.status}`);
+        }
+        avatarVoiceRefs.delete(preset.id);
+        if (avatarPresetId === preset.id) {
+            avatarPresetId = '';
+            storage.set(AVATAR_PRESET_STORAGE_KEY, '');
+        }
+        await loadAvatarPresets();
+        setAvatarPresetStatus('已删除');
+        hint(`已删除自建形象：${preset.name}`);
+    } catch (error) {
+        console.error(error);
+        setAvatarPresetStatus('删除失败', 'error');
+        hint(error.message || '删除形象失败', true);
+    } finally {
+        avatarPresetSwitching = false;
+        updateControls();
+    }
+}
+
 
 async function loadAvatarPresets() {
     try {
         const response = await fetch('/avatar-live/api/avatar-presets', {
             signal: AbortSignal.timeout(15000),
             cache: 'no-store',
+            headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
@@ -183,7 +282,10 @@ async function selectAvatarPreset(id) {
     try {
         const response = await fetch(`/avatar-live/api/avatar-presets/${encodeURIComponent(id)}/activate`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Avatar-Owner-ID': avatarOwnerId,
+            },
             signal: AbortSignal.timeout(60000),
         });
         let data = null;
@@ -220,24 +322,111 @@ async function selectAvatarPreset(id) {
     }
 }
 
+function setCustomAvatarStatus(text, state = '') {
+    const element = $('customAvatarStatus');
+    element.textContent = text;
+    if (state) element.dataset.state = state;
+    else delete element.dataset.state;
+}
+
+async function createCustomAvatar(event) {
+    event.preventDefault();
+    const video = $('customVideo').files[0];
+    const audio = $('customAudio').files[0];
+    const name = $('customAvatarName').value.trim();
+    const description = $('customAvatarDescription').value.trim();
+    const prompt = $('systemPrompt').value.trim();
+    if (!video || !audio || !name || !prompt) {
+        hint('请填写名称和提示词，并选择视频与参考音频', true);
+        return;
+    }
+    $('btnCreateAvatar').disabled = true;
+    $('customAvatarProgress').hidden = false;
+    $('customAvatarProgress').value = 0;
+    $('customAvatarHint').textContent = '正在上传素材…';
+    setCustomAvatarStatus('上传中');
+    avatarCustomizing = true;
+    updateControls();
+    try {
+        const job = await AvatarSessionClient.createCustomization({
+            baseUrl: location.origin,
+            apiPrefix: '/v1/avatar',
+            ownerId: avatarOwnerId,
+            video,
+            audio,
+            prompt,
+            name,
+            description,
+            onProgress: (ratio) => {
+                $('customAvatarProgress').value = Math.round(ratio * 12);
+                $('customAvatarHint').textContent = `上传中 ${Math.round(ratio * 100)}%`;
+            },
+        });
+        let current = job;
+        while (!['ready', 'failed', 'cancelled'].includes(current.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            current = await AvatarSessionClient.getCustomization({
+                baseUrl: location.origin,
+                apiPrefix: '/v1/avatar',
+                ownerId: avatarOwnerId,
+                jobId: job.job_id,
+            });
+            $('customAvatarProgress').value = current.progress || 0;
+            $('customAvatarHint').textContent = `${current.stage || current.status} · ${current.progress || 0}%`;
+            setCustomAvatarStatus(current.status === 'processing' ? '生成中' : current.status);
+        }
+        if (current.status !== 'ready') {
+            throw new Error(current.error || '形象生成失败');
+        }
+        $('customAvatarProgress').value = 100;
+        $('customAvatarHint').textContent = '生成完成，请在上方选择新形象';
+        setCustomAvatarStatus('已完成', 'ready');
+        await loadAvatarPresets();
+        if (current.preset_id) {
+            avatarPresetId = current.preset_id;
+            storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
+            renderAvatarPresets();
+        }
+    } catch (error) {
+        console.error(error);
+        setCustomAvatarStatus('失败', 'error');
+        $('customAvatarHint').textContent = error.message || '形象生成失败';
+    } finally {
+        avatarCustomizing = false;
+        updateControls();
+    }
+}
+
 function hint(text, error = false) {
     $('sessionHint').textContent = text;
     $('sessionHint').dataset.error = String(error);
 }
 
 function updateControls() {
-    const busy = starting || avatarPresetSwitching || Boolean(session?.running);
+    const sessionBusy = starting
+        || avatarPresetSwitching
+        || Boolean(session?.running);
+    const busy = sessionBusy || avatarCustomizing;
     const preset = selectedAvatarPreset();
     const ready = avatarPresetsLoaded
         && Boolean(preset?.available)
         && Boolean($('systemPrompt').value.trim());
     $('btnStart').disabled = busy || !healthy || !ready;
     $('btnStart').lastChild.textContent = starting ? ' 正在连接…' : ' 开始对话';
-    $('btnStop').disabled = !busy;
+    $('btnStop').disabled = !sessionBusy;
     $('btnMute').disabled = !session?.running;
     $('btnInterrupt').disabled = !session?.running;
     for (const id of ['systemPrompt', 'btnResetPrompt', 'micDevice', 'echoCancellation', 'btnRefreshDevices']) {
         $(id).disabled = busy || !avatarPresetsLoaded;
+    }
+    for (const id of [
+        'customVideo',
+        'customAudio',
+        'customAvatarName',
+        'customAvatarDescription',
+        'btnCreateAvatar',
+    ]) {
+        $(id).disabled = busy;
     }
     renderAvatarPresets();
     document.querySelector('.portrait-card').dataset.state = session?.running ? 'running' : 'idle';
@@ -733,6 +922,7 @@ $('btnRefreshAvatars').addEventListener('click', () => {
     setAvatarPresetStatus('检查中…');
     loadAvatarPresets();
 });
+$('avatarCreateForm').addEventListener('submit', createCustomAvatar);
 $('btnStart').addEventListener('click', start);
 $('btnStop').addEventListener('click', stop);
 $('btnInterrupt').addEventListener('click', () => interruptor?.trigger());

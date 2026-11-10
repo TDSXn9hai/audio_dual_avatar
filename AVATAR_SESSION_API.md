@@ -240,12 +240,90 @@ AVATAR_SESSION_API_KEY=
 AVATAR_SESSION_TTL_SECONDS=180
 AVATAR_SESSION_MAX_SECONDS=600
 AVATAR_SESSION_ALLOWED_ORIGINS=https://platform.example.com
+AVATAR_CUSTOMIZATION_ENABLED=true
+AVATAR_CUSTOMIZATION_VIDEO_MAX_SECONDS=20
+AVATAR_CUSTOMIZATION_AUDIO_MAX_SECONDS=20
 ```
 
 - `AVATAR_SESSION_API_KEY` 为空时允许同源/本地匿名调用。
 - `AVATAR_SESSION_ALLOWED_ORIGINS` 用于允许跨域浏览器调用，多个来源用逗号分隔。
 - 创建会话后必须在 TTL 内连接 WebSocket。
 - WebSocket 建立后最长运行到 `AVATAR_SESSION_MAX_SECONDS`。
+
+## 8. 用户形象定制
+
+创建任务：
+
+```http
+POST /v1/avatar/customizations
+Authorization: Bearer <api_key>
+X-Avatar-Owner-ID: <trusted-user-id>
+Content-Type: multipart/form-data
+```
+
+字段：
+
+- `video`：视频文件，最长 20 秒
+- `audio`：参考音频，最长 20 秒
+- `prompt`：提示词文本
+- `name`：形象名称
+- `description`：可选说明
+
+视频支持 `.mp4/.mov/.webm/.m4v`，默认最大 200 MiB；音频支持
+`.wav/.mp3/.m4a/.flac/.ogg`，默认最大 20 MiB；提示词默认最大 64 KiB。
+生成任务串行执行，调用 MuseTalk 前会检查当前没有活跃数字人会话。
+
+返回 HTTP 202：
+
+```json
+{"job_id":"acj_xxx","status":"queued","stage":"queued","progress":5}
+```
+
+查询：
+
+```http
+GET /v1/avatar/customizations/{job_id}
+X-Avatar-Owner-ID: <trusted-user-id>
+```
+
+取消：
+
+```http
+DELETE /v1/avatar/customizations/{job_id}
+X-Avatar-Owner-ID: <trusted-user-id>
+```
+
+完成后任务返回 `preset_id`。新预设写入运行时
+`data/avatar_customizations/avatar_presets.user.yaml`，随后出现在同名 owner 的
+`GET /v1/avatar/presets` 结果中。用户预设默认 `private`。
+
+`AVATAR_CUSTOMIZATION_DATA_ROOT` 的相对路径以 `minicpm_demo/` 为基准；
+默认 preset 路径会自动指向该目录下的 `avatar_presets.user.yaml`。
+
+`X-Avatar-Owner-ID` 必须由可信平台 BFF 注入，不能直接信任浏览器任意值。
+
+### 删除用户形象
+
+```http
+DELETE /v1/avatar/presets/{preset_id}
+Authorization: Bearer <api_key>
+X-Avatar-Owner-ID: <trusted-user-id>
+```
+
+只有 `source: user` 且 `owner_id` 与请求 owner 一致的 preset 可以通过 API
+删除。系统 preset 返回 `403 system_preset_protected`。
+
+删除时会检查参考音频、提示词、逐帧缓存和基底视频是否仍被其他 preset
+使用。共享文件会保留，独占文件才会删除。相关资源使用情况包括已禁用和
+其他 owner 的 preset。
+
+配置中的 `source` 取值为 `system` 或 `user`。命令行管理可删除任意 preset：
+
+```bash
+./delete_avatar.sh --dry-run up_0123456789abcdef
+./delete_avatar.sh up_0123456789abcdef
+./delete_avatar.sh system_preset --new-default knowledge_host_720p
+```
 
 最小 Python 客户端：
 

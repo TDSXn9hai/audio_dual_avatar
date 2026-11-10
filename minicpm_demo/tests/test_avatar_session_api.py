@@ -24,7 +24,7 @@ class _PresetRegistry:
     def load(self):
         return _PresetConfig()
 
-    def public_item(self, preset_id, avatar_status):
+    def public_item(self, preset_id, avatar_status, owner_id=None):
         assert preset_id == "knowledge_host_720p"
         assert avatar_status["active_avatar_id"] == "knowledge_host_720p"
         return {
@@ -35,7 +35,7 @@ class _PresetRegistry:
             "prompt": {"text": "你是一名知识传播助手"},
         }
 
-    def voice_audio(self, preset_id):
+    def voice_audio(self, preset_id, owner_id=None):
         assert preset_id == "knowledge_host_720p"
         return {"base64": "AAAA", "name": "voice.wav"}
 
@@ -113,6 +113,18 @@ def test_unattached_session_can_be_replaced() -> None:
     asyncio.run(scenario())
 
 
+def test_preset_in_use_tracks_active_sessions() -> None:
+    service = _service()
+
+    async def scenario():
+        created = await service.create_session({})
+        assert await service.is_preset_in_use("knowledge_host_720p")
+        service._sessions[created["session_id"]].closed = True
+        assert not await service.is_preset_in_use("knowledge_host_720p")
+
+    asyncio.run(scenario())
+
+
 def test_api_key_is_optional_unless_configured() -> None:
     open_service = _service()
     open_service.require_api_key(None)
@@ -165,5 +177,6 @@ def test_avatar_v2_page_and_sdk_assets_exist() -> None:
     assert "AvatarSessionClient" in sdk
     assert "apiPrefix = '/v1/avatar'" in sdk
     assert "${this.apiPrefix}/sessions" in sdk
+    assert "static async deletePreset" in sdk
     assert "input.audio.append" in sdk
     assert "media.ack" in sdk

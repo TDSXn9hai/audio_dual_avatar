@@ -1,4 +1,4 @@
-import { AvatarSessionClient } from './avatar-session-client.js?v=minimal-platform1';
+import { AvatarSessionClient } from './avatar-session-client.js?v=avatar-delete1';
 
 
 const $ = (id) => document.getElementById(id);
@@ -9,6 +9,8 @@ let client = null;
 let starting = false;
 let muted = false;
 let responseElement = null;
+let customizing = false;
+let presetData = [];
 
 
 function setStatus(text) {
@@ -23,7 +25,8 @@ function setHint(text) {
 
 function updateControls() {
     const running = Boolean(client);
-    $('start').disabled = starting || running;
+    const selected = presetData.find((item) => item.id === $('preset').value);
+    $('start').disabled = starting || running || customizing;
     $('interrupt').disabled = !running;
     $('mute').disabled = !running;
     $('stop').disabled = !running;
@@ -31,6 +34,8 @@ function updateControls() {
     $('micDevice').disabled = starting || running;
     $('refreshDevices').disabled = starting || running;
     $('mute').textContent = muted ? '取消静音' : '静音';
+    $('deletePreset').hidden = !selected?.deletable;
+    $('deletePreset').disabled = starting || running || customizing;
 }
 
 
@@ -51,12 +56,14 @@ async function loadPresets() {
         baseUrl: location.origin,
         apiPrefix: API_PREFIX,
     });
+    presetData = Array.isArray(data.presets) ? data.presets : [];
     $('preset').replaceChildren();
-    for (const preset of data.presets || []) {
+    for (const preset of presetData) {
         if (!preset.available) continue;
         $('preset').add(new Option(preset.name, preset.id));
     }
     if (data.default_preset_id) $('preset').value = data.default_preset_id;
+    updateControls();
 }
 
 
@@ -93,6 +100,91 @@ async function loadMicrophones({ requestPermission = false } = {}) {
             new Option('已保存的麦克风（等待授权）', current),
         );
         $('micDevice').value = current;
+    }
+}
+
+
+async function createCustomAvatar(event) {
+    event.preventDefault();
+    const video = $('customVideo').files[0];
+    const audio = $('customAudio').files[0];
+    const name = $('customName').value.trim();
+    const description = $('customDescription').value.trim();
+    const prompt = $('customPrompt').value.trim();
+    if (!video || !audio || !name || !prompt) {
+        setHint('请填写名称、提示词并选择视频和参考音频');
+        return;
+    }
+    $('createButton').disabled = true;
+    $('createProgress').hidden = false;
+    $('createProgress').value = 0;
+    $('createHint').textContent = '正在上传素材…';
+    customizing = true;
+    updateControls();
+    try {
+        let job = await AvatarSessionClient.createCustomization({
+            baseUrl: location.origin,
+            apiPrefix: API_PREFIX,
+            video,
+            audio,
+            prompt,
+            name,
+            description,
+            onProgress: (ratio) => {
+                $('createProgress').value = Math.round(ratio * 12);
+                $('createHint').textContent = `上传中 ${Math.round(ratio * 100)}%`;
+            },
+        });
+        while (!['ready', 'failed', 'cancelled'].includes(job.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            job = await AvatarSessionClient.getCustomization({
+                baseUrl: location.origin,
+                apiPrefix: API_PREFIX,
+                jobId: job.job_id,
+            });
+            $('createProgress').value = job.progress || 0;
+            $('createHint').textContent = `${job.stage || job.status} · ${job.progress || 0}%`;
+        }
+        if (job.status !== 'ready') {
+            throw new Error(job.error || '形象生成失败');
+        }
+        $('createProgress').value = 100;
+        $('createHint').textContent = '生成完成，正在刷新预设…';
+        await loadPresets();
+        if (job.preset_id) $('preset').value = job.preset_id;
+        $('createHint').textContent = '形象已生成，可以在上方选择';
+    } catch (error) {
+        console.error(error);
+        $('createHint').textContent = error?.message || '形象生成失败';
+    } finally {
+        customizing = false;
+        updateControls();
+    }
+}
+
+
+async function deleteSelectedPreset() {
+    if (starting || client || customizing) return;
+    const preset = presetData.find((item) => item.id === $('preset').value);
+    if (!preset?.deletable) return;
+    if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
+        return;
+    }
+    $('deletePreset').disabled = true;
+    setHint('正在删除自建形象…');
+    try {
+        await AvatarSessionClient.deletePreset({
+            baseUrl: location.origin,
+            apiPrefix: API_PREFIX,
+            presetId: preset.id,
+        });
+        await loadPresets();
+        setHint(`已删除自建形象：${preset.name}`);
+    } catch (error) {
+        console.error(error);
+        setHint(error?.message || '删除形象失败');
+    } finally {
+        updateControls();
     }
 }
 
@@ -200,6 +292,9 @@ $('refreshDevices').addEventListener('click', () => {
         setHint(error?.message || '麦克风列表刷新失败');
     });
 });
+$('createForm').addEventListener('submit', createCustomAvatar);
+$('deletePreset').addEventListener('click', deleteSelectedPreset);
+$('preset').addEventListener('change', updateControls);
 window.addEventListener('pagehide', () => client?.close());
 
 

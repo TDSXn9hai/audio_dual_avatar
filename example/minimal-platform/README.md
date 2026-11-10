@@ -74,7 +74,11 @@ python app.py \
 | GET | `/healthz` |
 | GET | `/readyz` |
 | GET | `/api/avatar/presets` |
+| DELETE | `/api/avatar/presets/{preset_id}` |
 | POST | `/api/avatar/sessions` |
+| POST | `/api/avatar/customizations` |
+| GET | `/api/avatar/customizations/{job_id}` |
+| DELETE | `/api/avatar/customizations/{job_id}` |
 | WSS | `/api/avatar/sessions/{session_id}/stream` |
 
 REST 请求会加上：
@@ -84,6 +88,18 @@ Authorization: Bearer <AVATAR_API_KEY>
 ```
 
 该密钥只保存在平台服务器。WebSocket 使用创建会话时返回的短期 token。
+自定义形象任务使用 `PLATFORM_AVATAR_OWNER_ID` 作为服务端可信 owner；
+浏览器传入的同名 header 不会被透传。
+
+`DELETE /api/avatar/presets/{preset_id}` 同样由平台注入可信 owner。Gateway 只允许
+删除该 owner 的 `source: user` preset；系统 preset 和其他 owner 的 preset 会被
+拒绝，共享的音频、提示词、缓存和视频不会被删除。
+
+形象视频和参考音频最长均为 20 秒。上传接口会把 multipart 请求流式转发给
+数字人 Gateway，不在平台服务器落盘；任务状态使用 `job_id` 轮询。生成的用户
+预设默认 `private`，只能由相同 `PLATFORM_AVATAR_OWNER_ID` 查询和创建会话。
+如需支持多个终端用户，应把该值替换成平台登录态中的真实用户 ID，而不是让
+浏览器自行提交 owner。
 
 ## 4. 前端
 

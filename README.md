@@ -147,6 +147,7 @@ curl -k -X POST https://127.0.0.1:8006/avatar-live/api/avatar/select \
 ```yaml
 presets:
   knowledge_host_720p:
+    source: system
     avatar_id: knowledge_host_720p
     voice_ref: assets/ref_audio/ref_avatar_default.wav
     prompt_file: assets/prompts/avatar/knowledge_host.txt
@@ -158,6 +159,19 @@ presets:
 
 新增形象时需要同时准备形象缓存、参考音频、提示词文件，并在 YAML 中增加对应配置。
 YAML 支持热加载，修改后不需要重启 Gateway。
+
+`source` 必须为 `system` 或 `user`。用户上传生成的 preset 写入运行时配置并标记
+为 `user`，系统内置 preset 标记为 `system`。用户页面只允许删除自己的 `user`
+preset；管理员可以删除任意 preset：
+
+```bash
+./delete_avatar.sh --dry-run musetalk_test_avatar
+./delete_avatar.sh musetalk_test_avatar
+```
+
+删除前会扫描所有剩余 preset 的参考音频、提示词、缓存和基底视频引用。被其他
+preset 共用的文件会保留。删除当前 default preset 时必须通过 `--new-default`
+指定替代 preset。
 
 `/avatar` 还会使用自己的默认参考音色
 `assets/ref_audio/ref_avatar_default.wav`，对应配置项
@@ -213,6 +227,16 @@ SDK 负责麦克风采集、WebCodecs/WebP 解码、音画同步、ACK、打断�
 跨机器平台接入的最小 BFF/静态代理示例见
 [`example/minimal-platform`](example/minimal-platform/README.md)。
 
+`/avatar` 和 `/avatar-v2` 支持上传最长 20 秒的视频和参考音频，异步生成用户
+数字人缓存。任务状态通过 `/v1/avatar/customizations` 查询；用户预设默认私有，
+生成完成后出现在预设列表中。直接页面仅适合同源演示；多用户部署应由可信 BFF
+注入 `X-Avatar-Owner-ID`，不要信任浏览器自行提交的 owner。
+
+形象配置使用 `source: system|user` 区分来源。用户可在页面删除自己的自建形象，
+系统预设不能通过 API 删除。`./delete_avatar.sh PRESET_ID` 可由管理员删除任意
+preset；所有删除都会先检查其他 preset 的引用，共享的音频、提示词、缓存和视频
+不会被删除。
+
 ### H.264 数字人视频流
 
 实时 viewer 现在默认使用 ffmpeg/libx264 编码的 H.264 Annex-B 视频流。浏览器通过
@@ -243,7 +267,7 @@ H.264 默认参数为：目标码率 `2M`、最大码率 `3M`、每 120 帧插�
 
 - `minicpm_demo/` — MiniCPM-o 4.5 全双工示例，包含 Gateway、Worker、Backend、Web UI、数字人桥接和 `/avatar` 页面
 - `musetalk_project/MuseTalk/` — 流式 MuseTalk 服务，包含 `muse_stream/` 和 `/ws/minicpm` 输入
-- `install.sh`、`start_avatar.sh`、`add_avatar.sh` — 一键安装、启动和形象添加脚本
+- `install.sh`、`start_avatar.sh`、`add_avatar.sh`、`delete_avatar.sh` — 一键安装、启动和形象管理脚本
 - `requirements-avatar.lock.txt`、`weights.sha256` — 固定依赖版本和模型权重校验文件
 
 设计与调度、桥接层和前端实现说明：[DIGITAL_HUMAN_INTEGRATION.md](DIGITAL_HUMAN_INTEGRATION.md)。

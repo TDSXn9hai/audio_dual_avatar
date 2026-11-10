@@ -1,4 +1,4 @@
-import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=session-api6';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete1';
 
 
 const $ = (id) => document.getElementById(id);
@@ -6,7 +6,21 @@ let client = null;
 let starting = false;
 let muted = false;
 let currentResponse = null;
+let customizing = false;
+let presetData = [];
 const MIC_DEVICE_KEY = 'avatar.ui.micDevice';
+const OWNER_KEY = 'avatar.ownerId';
+const ownerId = getOwnerId();
+
+
+function getOwnerId() {
+    const existing = localStorage.getItem(OWNER_KEY);
+    if (existing) return existing;
+    const value = crypto.randomUUID?.()
+        || `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(OWNER_KEY, value);
+    return value;
+}
 
 
 function setStatus(text) {
@@ -21,13 +35,26 @@ function setHint(text) {
 
 function updateControls() {
     const running = Boolean(client);
-    $('start').disabled = starting || running;
+    const selected = presetData.find((item) => item.id === $('preset').value);
+    $('start').disabled = starting || running || customizing;
     $('stop').disabled = !running;
     $('interrupt').disabled = !running;
     $('mute').disabled = !running;
     $('mute').textContent = muted ? '取消静音' : '静音';
     $('micDevice').disabled = starting || running;
     $('refreshDevices').disabled = starting || running;
+    for (const id of [
+        'customVideo',
+        'customAudio',
+        'customName',
+        'customDescription',
+        'customPrompt',
+        'createButton',
+    ]) {
+        $(id).disabled = starting || running || customizing;
+    }
+    $('deletePreset').hidden = !selected?.deletable;
+    $('deletePreset').disabled = starting || running || customizing;
 }
 
 
@@ -44,13 +71,18 @@ function appendTranscript(text) {
 
 
 async function loadPresets() {
-    const data = await AvatarSessionClient.listPresets();
+    const data = await AvatarSessionClient.listPresets({
+        baseUrl: location.origin,
+        ownerId,
+    });
+    presetData = Array.isArray(data.presets) ? data.presets : [];
     $('preset').replaceChildren();
-    for (const item of data.presets || []) {
+    for (const item of presetData) {
         if (!item.available) continue;
         $('preset').add(new Option(item.name, item.id));
     }
     if (data.default_preset_id) $('preset').value = data.default_preset_id;
+    updateControls();
 }
 
 
@@ -83,6 +115,91 @@ async function loadMicrophones({ requestPermission = false } = {}) {
 }
 
 
+async function createCustomAvatar(event) {
+    event.preventDefault();
+    const video = $('customVideo').files[0];
+    const audio = $('customAudio').files[0];
+    const name = $('customName').value.trim();
+    const description = $('customDescription').value.trim();
+    const prompt = $('customPrompt').value.trim();
+    if (!video || !audio || !name || !prompt) {
+        setHint('请填写名称、提示词并选择视频和参考音频');
+        return;
+    }
+    $('createButton').disabled = true;
+    $('createProgress').hidden = false;
+    $('createProgress').value = 0;
+    $('createHint').textContent = '正在上传素材…';
+    customizing = true;
+    updateControls();
+    try {
+        let job = await AvatarSessionClient.createCustomization({
+            baseUrl: location.origin,
+            ownerId,
+            video,
+            audio,
+            prompt,
+            name,
+            description,
+            onProgress: (ratio) => {
+                $('createProgress').value = Math.round(ratio * 12);
+                $('createHint').textContent = `上传中 ${Math.round(ratio * 100)}%`;
+            },
+        });
+        while (!['ready', 'failed', 'cancelled'].includes(job.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            job = await AvatarSessionClient.getCustomization({
+                baseUrl: location.origin,
+                ownerId,
+                jobId: job.job_id,
+            });
+            $('createProgress').value = job.progress || 0;
+            $('createHint').textContent = `${job.stage || job.status} · ${job.progress || 0}%`;
+        }
+        if (job.status !== 'ready') {
+            throw new Error(job.error || '形象生成失败');
+        }
+        $('createProgress').value = 100;
+        $('createHint').textContent = '生成完成，正在刷新预设…';
+        await loadPresets();
+        if (job.preset_id) $('preset').value = job.preset_id;
+        $('createHint').textContent = '形象已生成，可以在上方选择';
+    } catch (error) {
+        console.error(error);
+        $('createHint').textContent = error?.message || '形象生成失败';
+    } finally {
+        customizing = false;
+        updateControls();
+    }
+}
+
+
+async function deleteSelectedPreset() {
+    if (starting || client || customizing) return;
+    const preset = presetData.find((item) => item.id === $('preset').value);
+    if (!preset?.deletable) return;
+    if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
+        return;
+    }
+    $('deletePreset').disabled = true;
+    setHint('正在删除自建形象…');
+    try {
+        await AvatarSessionClient.deletePreset({
+            baseUrl: location.origin,
+            ownerId,
+            presetId: preset.id,
+        });
+        await loadPresets();
+        setHint(`已删除自建形象：${preset.name}`);
+    } catch (error) {
+        console.error(error);
+        setHint(error?.message || '删除形象失败');
+    } finally {
+        updateControls();
+    }
+}
+
+
 async function start() {
     if (starting || client) return;
     starting = true;
@@ -95,6 +212,7 @@ async function start() {
             canvas: $('avatarCanvas'),
             presetId: $('preset').value,
             microphoneDeviceId: $('micDevice').value,
+            ownerId,
         });
         client = instance;
         instance.on('ready', (message) => {
@@ -188,6 +306,9 @@ $('mute').addEventListener('click', () => {
     updateControls();
 });
 $('stop').addEventListener('click', () => client?.close());
+$('createForm').addEventListener('submit', createCustomAvatar);
+$('deletePreset').addEventListener('click', deleteSelectedPreset);
+$('preset').addEventListener('change', updateControls);
 $('micDevice').addEventListener('change', () => {
     localStorage.setItem(MIC_DEVICE_KEY, $('micDevice').value);
 });

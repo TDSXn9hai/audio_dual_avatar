@@ -4,6 +4,7 @@ presets:
   knowledge_host_720p:
     name: 知识分享
     description: 720p 知识传播数字人
+    source: system
     avatar_id: knowledge_host_720p
     voice_ref: assets/ref_audio/ref_avatar_default.wav
     prompt_file: assets/prompts/avatar/knowledge_host.txt
@@ -12,6 +13,7 @@ presets:
   musetalk_test_avatar:
     name: 经典形象
     description: 480×864 经典数字人
+    source: system
     avatar_id: musetalk_test_avatar
     voice_ref: assets/ref_audio/ref_minicpm_signature.wav
     prompt_file: assets/prompts/avatar/classic.txt
@@ -20,6 +22,7 @@ presets:
   ecommerce:
     name: 电商小选
     description: 由 add_avatar.sh 添加的数字人形象
+    source: system
     avatar_id: ecommerce
     voice_ref: assets/ref_audio/ref_minicpm_signature.wav
     prompt_file: assets/prompts/avatar/ecommerce.txt

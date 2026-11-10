@@ -103,12 +103,23 @@ class AvatarSessionService:
                 code="invalid_api_key",
             )
 
-    async def list_presets(self) -> Dict[str, Any]:
+    async def is_preset_in_use(self, preset_id: str) -> bool:
+        async with self._lock:
+            return any(
+                session.preset_id == preset_id and not session.closed
+                for session in self._sessions.values()
+            )
+
+    async def list_presets(
+        self,
+        owner_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         avatar_status = await self._fetch_avatar_status()
         try:
             return await asyncio.to_thread(
                 self.preset_registry.public_list,
                 avatar_status,
+                owner_id,
             )
         except AvatarPresetError as exc:
             raise AvatarSessionError(
@@ -117,7 +128,11 @@ class AvatarSessionService:
                 code="avatar_preset_config_error",
             ) from exc
 
-    async def create_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_session(
+        self,
+        payload: Dict[str, Any],
+        owner_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             raise AvatarSessionError("JSON object required")
 
@@ -187,6 +202,7 @@ class AvatarSessionService:
                     self.preset_registry.public_item,
                     preset_id,
                     avatar_status,
+                    owner_id,
                 )
             except AvatarPresetError as exc:
                 raise AvatarSessionError(
@@ -200,6 +216,7 @@ class AvatarSessionService:
                 voice = await asyncio.to_thread(
                     self.preset_registry.voice_audio,
                     preset_id,
+                    owner_id,
                 )
             except AvatarPresetError as exc:
                 raise AvatarSessionError(

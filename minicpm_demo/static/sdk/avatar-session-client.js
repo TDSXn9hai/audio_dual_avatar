@@ -70,6 +70,7 @@ export class AvatarSessionClient {
         baseUrl = '',
         apiKey = '',
         apiPrefix = '/v1/avatar',
+        ownerId = '',
     } = {}) {
         const response = await fetch(
             new URL(
@@ -77,14 +78,53 @@ export class AvatarSessionClient {
                 baseUrl || location.origin,
             ),
             {
-                headers: apiKey
-                    ? { Authorization: `Bearer ${apiKey}` }
-                    : {},
+                headers: {
+                    ...(apiKey
+                        ? { Authorization: `Bearer ${apiKey}` }
+                        : {}),
+                    ...(ownerId
+                        ? { 'X-Avatar-Owner-ID': ownerId }
+                        : {}),
+                },
                 cache: 'no-store',
             },
         );
         if (!response.ok) {
             throw await _responseError(response, 'Failed to load presets');
+        }
+        return response.json();
+    }
+
+    static async deletePreset({
+        baseUrl = '',
+        apiKey = '',
+        apiPrefix = '/v1/avatar',
+        ownerId = '',
+        presetId,
+    }) {
+        const response = await fetch(
+            new URL(
+                `${apiPrefix.replace(/\/$/, '')}/presets/${encodeURIComponent(presetId)}`,
+                baseUrl || location.origin,
+            ),
+            {
+                method: 'DELETE',
+                headers: {
+                    ...(apiKey
+                        ? { Authorization: `Bearer ${apiKey}` }
+                        : {}),
+                    ...(ownerId
+                        ? { 'X-Avatar-Owner-ID': ownerId }
+                        : {}),
+                },
+                cache: 'no-store',
+            },
+        );
+        if (!response.ok) {
+            throw await _responseError(
+                response,
+                'Failed to delete avatar preset',
+            );
         }
         return response.json();
     }
@@ -99,6 +139,7 @@ export class AvatarSessionClient {
         inputFormat = 'pcm_f32le_16000',
         microphoneDeviceId = '',
         apiPrefix = '/v1/avatar',
+        ownerId = '',
     } = {}) {
         this.canvas = canvas;
         this.baseUrl = baseUrl || location.origin;
@@ -109,6 +150,7 @@ export class AvatarSessionClient {
         this.inputFormat = inputFormat;
         this.microphoneDeviceId = microphoneDeviceId;
         this.apiPrefix = apiPrefix.replace(/\/$/, '');
+        this.ownerId = ownerId;
         this.session = null;
         this.ws = null;
         this.audioCtx = null;
@@ -185,6 +227,9 @@ export class AvatarSessionClient {
                     ...(this.apiKey
                         ? { Authorization: `Bearer ${this.apiKey}` }
                         : {}),
+                    ...(this.ownerId
+                        ? { 'X-Avatar-Owner-ID': this.ownerId }
+                        : {}),
                 },
                 body: JSON.stringify({
                     preset_id: this.presetId || undefined,
@@ -252,6 +297,98 @@ export class AvatarSessionClient {
             capabilities: { video_codecs: videoCodecs },
         }));
         return ready;
+    }
+
+    static async createCustomization({
+        baseUrl = '',
+        apiKey = '',
+        apiPrefix = '/v1/avatar',
+        ownerId = '',
+        video,
+        audio,
+        prompt,
+        name,
+        description = '',
+        onProgress = null,
+    }) {
+        const form = new FormData();
+        form.append('video', video, video.name);
+        form.append('audio', audio, audio.name);
+        form.append('prompt', prompt);
+        form.append('name', name);
+        form.append('description', description);
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open(
+                'POST',
+                new URL(
+                    `${apiPrefix.replace(/\/$/, '')}/customizations`,
+                    baseUrl || location.origin,
+                ),
+            );
+            if (apiKey) {
+                xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
+            }
+            if (ownerId) {
+                xhr.setRequestHeader('X-Avatar-Owner-ID', ownerId);
+            }
+            xhr.upload.onprogress = (event) => {
+                if (typeof onProgress === 'function') {
+                    const ratio = event.lengthComputable
+                        ? event.loaded / event.total
+                        : 0;
+                    onProgress(ratio);
+                }
+            };
+            xhr.onerror = () => reject(new Error('Avatar upload failed'));
+            xhr.onload = () => {
+                let payload = null;
+                try {
+                    payload = JSON.parse(xhr.responseText);
+                } catch {
+                    // Keep fallback error.
+                }
+                if (xhr.status < 200 || xhr.status >= 300) {
+                    reject(_apiError(payload, `Avatar upload failed: ${xhr.status}`));
+                    return;
+                }
+                resolve(payload);
+            };
+            xhr.send(form);
+        });
+    }
+
+    static async getCustomization({
+        baseUrl = '',
+        apiKey = '',
+        apiPrefix = '/v1/avatar',
+        ownerId = '',
+        jobId,
+    }) {
+        const response = await fetch(
+            new URL(
+                `${apiPrefix.replace(/\/$/, '')}/customizations/${encodeURIComponent(jobId)}`,
+                baseUrl || location.origin,
+            ),
+            {
+                headers: {
+                    ...(apiKey
+                        ? { Authorization: `Bearer ${apiKey}` }
+                        : {}),
+                    ...(ownerId
+                        ? { 'X-Avatar-Owner-ID': ownerId }
+                        : {}),
+                },
+                cache: 'no-store',
+            },
+        );
+        if (!response.ok) {
+            throw await _responseError(
+                response,
+                'Failed to query avatar customization',
+            );
+        }
+        return response.json();
     }
 
     async _supportedVideoCodecs() {
@@ -837,7 +974,6 @@ export class AvatarSessionClient {
         clearTimeout(this.interruptTimer);
         this.interruptTimer = null;
         this.discardUntilFlush = false;
-        this._resetDecoder();
         this._dropFromCurrent();
         const frameIndex = Number(message.frame_index);
         if (Number.isFinite(frameIndex)) {
@@ -849,6 +985,10 @@ export class AvatarSessionClient {
                 }
             }
         }
+        // A flush is a new H.264 decoding epoch. Recreate the decoder so the
+        // incoming post-flush IDR can be consumed instead of being dropped by
+        // the null decoder left behind by interrupt().
+        this._configureVideoDecoder();
         this._emit('flush', message);
     }
 
@@ -1005,6 +1145,17 @@ async function _responseError(response, fallback) {
     const error = new Error(message || fallback);
     error.code = typeof detail === 'object' ? detail?.code : undefined;
     error.status = response.status;
+    return error;
+}
+
+
+function _apiError(payload, fallback) {
+    const detail = payload?.detail;
+    const message = typeof detail === 'object'
+        ? detail?.message
+        : detail;
+    const error = new Error(message || fallback);
+    error.code = typeof detail === 'object' ? detail?.code : undefined;
     return error;
 }
 

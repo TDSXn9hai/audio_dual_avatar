@@ -69,6 +69,8 @@ def test_repository_avatar_presets_are_config_driven() -> None:
     assert current["voice"]["name"] == "ref_avatar_default.wav"
     assert "中文知识传播助手" in current["prompt"]["text"]
     assert current["prompt"]["sha256"]
+    assert current["source"] == "system"
+    assert current["deletable"] is False
 
     assert classic["available"]
     assert classic["cache"]["width"] == 480
@@ -172,3 +174,82 @@ def test_preset_config_hot_reloads_after_file_change(tmp_path: Path) -> None:
     stat = config_path.stat()
     os.utime(config_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
     assert [preset.id for preset in registry.load().presets] == ["second"]
+
+
+def test_runtime_private_presets_are_merged_and_owner_scoped(tmp_path: Path) -> None:
+    builtin = tmp_path / "avatar_presets.yaml"
+    runtime = tmp_path / "avatar_presets.user.yaml"
+    builtin.write_text(
+        """
+version: 1
+default_preset: public
+presets:
+  public:
+    name: Public
+    avatar_id: public_avatar
+    voice_ref: voice.wav
+    prompt_file: prompt.txt
+    order: 10
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    runtime.write_text(
+        """
+version: 1
+presets:
+  private:
+    name: Private
+    avatar_id: private_avatar
+    voice_ref: private.wav
+    prompt_file: private.txt
+    owner_id: user-a
+    visibility: private
+    order: 20
+    enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    registry = AvatarPresetRegistry(
+        tmp_path,
+        config_path="avatar_presets.yaml",
+        runtime_config_path="avatar_presets.user.yaml",
+    )
+    config = registry.load()
+    assert [preset.id for preset in config.presets] == ["public", "private"]
+    assert registry.get("public").id == "public"
+    with pytest.raises(AvatarPresetError):
+        registry.get("private")
+    private = registry.get("private", owner_id="user-a")
+    assert private.id == "private"
+    assert private.source == "user"
+    payload = registry.public_list(_avatar_status(), owner_id="user-a")
+    private_item = next(
+        item for item in payload["presets"]
+        if item["id"] == "private"
+    )
+    assert private_item["deletable"] is True
+
+
+def test_invalid_preset_source_is_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "avatar_presets.yaml"
+    config_path.write_text(
+        """
+version: 1
+default_preset: bad
+presets:
+  bad:
+    name: Bad
+    source: external
+    avatar_id: bad
+    voice_ref: voice.wav
+    prompt_file: prompt.txt
+""".strip(),
+        encoding="utf-8",
+    )
+    registry = AvatarPresetRegistry(
+        tmp_path,
+        config_path="avatar_presets.yaml",
+    )
+    with pytest.raises(AvatarPresetError, match="source must be system or user"):
+        registry.load()

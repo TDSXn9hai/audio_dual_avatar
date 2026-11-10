@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#11141e">
     <title>实时交互数字人</title>
-    <link rel="stylesheet" href="/static/avatar/avatar.css?v=avatar-presets2">
+    <link rel="stylesheet" href="/static/avatar/avatar.css?v=avatar-delete1">
     <link rel="modulepreload" href="/static/avatar/avatar-app.js?v=avatar-presets2">
     <link rel="modulepreload" href="/static/avatar/avatar-player.js?v=h2641">
 </head>
@@ -53,6 +53,35 @@
             </div>
         </section>
         <aside class="settings-column" aria-label="对话设置与记录">
+            <details class="panel avatar-create-panel" id="avatarCreatePanel">
+                <summary class="panel-heading">
+                    <span><span class="panel-icon"><svg><use href="#i-avatar"/></svg></span><span>创建我的形象</span></span>
+                    <span class="avatar-preset-status" id="customAvatarStatus">上传素材生成</span>
+                </summary>
+                <form class="avatar-create-form" id="avatarCreateForm">
+                    <label class="field-label">
+                        <span>形象视频</span>
+                        <input id="customVideo" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required>
+                    </label>
+                    <label class="field-label">
+                        <span>参考音频</span>
+                        <input id="customAudio" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg" required>
+                    </label>
+                    <label class="field-label">
+                        <span>形象名称</span>
+                        <input id="customAvatarName" type="text" maxlength="80" placeholder="例如：我的讲解员" required>
+                    </label>
+                    <label class="field-label">
+                        <span>形象说明</span>
+                        <input id="customAvatarDescription" type="text" maxlength="300" placeholder="可选">
+                    </label>
+                    <div class="avatar-create-actions">
+                        <button class="button button-primary" id="btnCreateAvatar" type="submit">上传并生成</button>
+                        <span class="avatar-create-hint" id="customAvatarHint">视频和音频均不超过 20 秒</span>
+                    </div>
+                    <progress id="customAvatarProgress" max="100" value="0" hidden></progress>
+                </form>
+            </details>
             <section class="panel avatar-panel" aria-labelledby="avatarPresetTitle">
                 <div class="panel-heading">
                     <div><span class="panel-icon"><svg><use href="#i-avatar"/></svg></span><h2 id="avatarPresetTitle">数字人形象</h2></div>
@@ -85,6 +114,6 @@
             </section>
         </aside>
     </main>
-    <script type="module" src="/static/avatar/avatar-app.js?v=avatar-presets2"></script>
+    <script type="module" src="/static/avatar/avatar-app.js?v=avatar-delete1"></script>
 </body>
 </html>

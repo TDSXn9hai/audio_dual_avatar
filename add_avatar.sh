@@ -25,6 +25,9 @@ GPU_ARG=""
 PRESET_ID=""
 PRESET_NAME=""
 PRESET_DESCRIPTION="由 add_avatar.sh 添加的数字人形象"
+OWNER_ID=""
+VISIBILITY=""
+RUNTIME_MODE=0
 DRY_RUN=0
 POSITIONAL=()
 
@@ -47,6 +50,9 @@ Options:
   --preset-id ID        Preset ID. Default: AVATAR_ID.
   --name NAME           Display name on the avatar card. Default: AVATAR_ID.
   --description TEXT    Card description.
+  --owner-id ID         Owner for a runtime-created private preset.
+  --visibility MODE     public or private. Default: private in runtime mode.
+  --runtime             Write runtime user data instead of repository files.
   --dry-run             Validate and print the plan without writing files.
   -h, --help            Show this help.
 
@@ -62,6 +68,7 @@ in musetalk_project/venv because that environment provides mmpose/mmcv.
 Examples:
   ./add_avatar.sh data/video/alice.mp4 alice_avatar data/alice.wav data/alice.txt
   ./add_avatar.sh --gpu 1 video.mp4 alice default knowledge_host
+  ./add_avatar.sh --runtime --owner-id user-a video.mp4 alice voice.wav prompt.txt
   ./add_avatar.sh --name "讲解员小艾" --dry-run video.mp4 alice voice.wav prompt.txt
 EOF
 }
@@ -98,6 +105,20 @@ while [[ $# -gt 0 ]]; do
             PRESET_DESCRIPTION="$2"
             shift 2
             ;;
+        --owner-id)
+            [[ $# -ge 2 ]] || die "--owner-id requires a value"
+            OWNER_ID="$2"
+            shift 2
+            ;;
+        --visibility)
+            [[ $# -ge 2 ]] || die "--visibility requires a value"
+            VISIBILITY="$2"
+            shift 2
+            ;;
+        --runtime)
+            RUNTIME_MODE=1
+            shift
+            ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -132,6 +153,16 @@ VOICE_ARG="${POSITIONAL[2]}"
 PROMPT_ARG="${POSITIONAL[3]}"
 PRESET_ID="${PRESET_ID:-${AVATAR_ID}}"
 PRESET_NAME="${PRESET_NAME:-${AVATAR_ID}}"
+if [[ "${RUNTIME_MODE}" -eq 1 ]]; then
+    VISIBILITY="${VISIBILITY:-private}"
+    OWNER_ID="${OWNER_ID:-anonymous}"
+else
+    VISIBILITY="${VISIBILITY:-public}"
+    [[ -z "${OWNER_ID}" ]] \
+        || die "--owner-id is only valid together with --runtime"
+fi
+PRESET_SOURCE="system"
+[[ "${RUNTIME_MODE}" -eq 1 ]] && PRESET_SOURCE="user"
 REQUESTED_GPU="${GPU_ARG:-${ADD_AVATAR_GPU:-}}"
 MIN_FREE_MB="${ADD_AVATAR_MIN_FREE_MB:-12000}"
 
@@ -139,12 +170,34 @@ MIN_FREE_MB="${ADD_AVATAR_MIN_FREE_MB:-12000}"
     || die "invalid AVATAR_ID: '${AVATAR_ID}'; use letters, digits, '_' or '-'"
 [[ "${PRESET_ID}" =~ ^[A-Za-z0-9_-]{1,64}$ ]] \
     || die "invalid preset ID: '${PRESET_ID}'; use 1-64 letters, digits, '_' or '-'"
+[[ -z "${OWNER_ID}" || "${OWNER_ID}" =~ ^[A-Za-z0-9_.:@-]{1,128}$ ]] \
+    || die "invalid OWNER_ID"
+[[ "${VISIBILITY}" == "public" || "${VISIBILITY}" == "private" ]] \
+    || die "VISIBILITY must be public or private"
 [[ -z "${REQUESTED_GPU}" || "${REQUESTED_GPU}" =~ ^[0-9]+$ ]] \
     || die "--gpu/ADD_AVATAR_GPU must be a numeric GPU index"
 [[ "${MIN_FREE_MB}" =~ ^[0-9]+$ ]] \
     || die "ADD_AVATAR_MIN_FREE_MB must be a positive integer"
 
 cd "${ROOT}"
+
+if [[ "${RUNTIME_MODE}" -eq 1 ]]; then
+    RUNTIME_DATA_ROOT="${AVATAR_RUNTIME_ROOT:-${MINICPM_DIR}/data/avatar_customizations}"
+    RUNTIME_DATA_ROOT="$(realpath --canonicalize-missing -- "${RUNTIME_DATA_ROOT}")"
+    case "${RUNTIME_DATA_ROOT}/" in
+        "${MINICPM_DIR}/"*) ;;
+        *) die "runtime data root must be under ${MINICPM_DIR}" ;;
+    esac
+    VOICE_DIR="${RUNTIME_DATA_ROOT}/assets/ref_audio"
+    PROMPT_DIR="${RUNTIME_DATA_ROOT}/assets/prompts/avatar"
+    PRESET_FILE="${RUNTIME_DATA_ROOT}/avatar_presets.user.yaml"
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+        mkdir -p "${VOICE_DIR}" "${PROMPT_DIR}" "${RUNTIME_DATA_ROOT}"
+        if [[ ! -f "${PRESET_FILE}" ]]; then
+            printf 'version: 1\npresets: {}\n' >"${PRESET_FILE}"
+        fi
+    fi
+fi
 
 [[ -f "${SHARED_ACTIVATE}" ]] \
     || die "missing shared venv activation script: ${SHARED_ACTIVATE}; run ./install.sh first"
@@ -192,22 +245,35 @@ PROMPT_SOURCE="$(resolve_asset "${PROMPT_ARG}" "${PROMPT_DIR}" ".txt")" \
     || die "missing mmpose-capable Python: ${MUSETALK_PY}; run ./install.sh first"
 [[ -x "${PROJECT_PY}" ]] \
     || die "missing shared Python: ${PROJECT_PY}; run ./install.sh first"
-[[ -f "${PRESET_FILE}" ]] || die "avatar preset config not found: ${PRESET_FILE}"
-[[ -f "${MANIFEST_FILE}" ]] || die "manifest not found: ${MANIFEST_FILE}"
+ALLOW_MISSING_PRESET=0
+if [[ ! -f "${PRESET_FILE}" ]]; then
+    if [[ "${RUNTIME_MODE}" -eq 1 && "${DRY_RUN}" -eq 1 ]]; then
+        ALLOW_MISSING_PRESET=1
+    else
+        die "avatar preset config not found: ${PRESET_FILE}"
+    fi
+fi
+if [[ "${RUNTIME_MODE}" -eq 0 ]]; then
+    [[ -f "${MANIFEST_FILE}" ]] || die "manifest not found: ${MANIFEST_FILE}"
+fi
 
 PATH="${MINICPM_DIR}/.bin:${PATH}" "${PROJECT_PY}" - \
     "${PRESET_FILE}" \
     "${PRESET_ID}" \
     "${VOICE_SOURCE}" \
-    "${PROMPT_SOURCE}" <<'PY'
+    "${PROMPT_SOURCE}" \
+    "${ALLOW_MISSING_PRESET}" <<'PY'
 import sys
 from pathlib import Path
 
 import librosa
 import yaml
 
-preset_path, preset_id, voice_path, prompt_path = sys.argv[1:]
-config = yaml.safe_load(Path(preset_path).read_text(encoding="utf-8"))
+preset_path, preset_id, voice_path, prompt_path, allow_missing = sys.argv[1:]
+if allow_missing == "1" and not Path(preset_path).is_file():
+    config = {"version": 1, "presets": {}}
+else:
+    config = yaml.safe_load(Path(preset_path).read_text(encoding="utf-8"))
 if not isinstance(config, dict) or not isinstance(config.get("presets"), dict):
     raise SystemExit(f"invalid avatar preset config: {preset_path}")
 if preset_id in config["presets"]:
@@ -248,11 +314,11 @@ fi
 
 if [[ "${VOICE_SOURCE}" == "${VOICE_DIR}/"* ]]; then
     VOICE_DEST="${VOICE_SOURCE}"
-    VOICE_REL="assets/ref_audio/${VOICE_SOURCE#"${VOICE_DIR}/"}"
+    VOICE_REL="$(realpath --relative-to="${MINICPM_DIR}" -- "${VOICE_DEST}")"
     CREATE_VOICE=0
 else
     VOICE_DEST="${VOICE_DIR}/${AVATAR_ID}_voice.${voice_extension}"
-    VOICE_REL="assets/ref_audio/${VOICE_DEST##*/}"
+    VOICE_REL="$(realpath --canonicalize-missing --relative-to="${MINICPM_DIR}" -- "${VOICE_DEST}")"
     CREATE_VOICE=1
     [[ ! -e "${VOICE_DEST}" ]] \
         || die "voice destination already exists: ${VOICE_DEST}; choose a new AVATAR_ID"
@@ -260,11 +326,11 @@ fi
 
 if [[ "${PROMPT_SOURCE}" == "${PROMPT_DIR}/"* ]]; then
     PROMPT_DEST="${PROMPT_SOURCE}"
-    PROMPT_REL="assets/prompts/avatar/${PROMPT_SOURCE#"${PROMPT_DIR}/"}"
+    PROMPT_REL="$(realpath --relative-to="${MINICPM_DIR}" -- "${PROMPT_DEST}")"
     CREATE_PROMPT=0
 else
     PROMPT_DEST="${PROMPT_DIR}/${AVATAR_ID}.txt"
-    PROMPT_REL="assets/prompts/avatar/${AVATAR_ID}.txt"
+    PROMPT_REL="$(realpath --canonicalize-missing --relative-to="${MINICPM_DIR}" -- "${PROMPT_DEST}")"
     CREATE_PROMPT=1
     [[ ! -e "${PROMPT_DEST}" ]] \
         || die "prompt destination already exists: ${PROMPT_DEST}; choose a new AVATAR_ID"
@@ -453,10 +519,16 @@ fi
 
 PATH="${MINICPM_DIR}/.bin:${PATH}" "${PROJECT_PY}" - \
     "${MINICPM_DIR}" \
+    "${PRESET_FILE}" \
+    "${MANIFEST_FILE}" \
+    "${RUNTIME_MODE}" \
     "${AVATAR_ID}" \
     "${PRESET_ID}" \
     "${PRESET_NAME}" \
     "${PRESET_DESCRIPTION}" \
+    "${OWNER_ID}" \
+    "${VISIBILITY}" \
+    "${PRESET_SOURCE}" \
     "${VOICE_DEST}" \
     "${PROMPT_DEST}" \
     "${VOICE_REL}" \
@@ -472,10 +544,16 @@ import yaml
 
 (
     minicpm_dir,
+    preset_path,
+    manifest_path,
+    runtime_mode,
     avatar_id,
     preset_id,
     preset_name,
     description,
+    owner_id,
+    visibility,
+    preset_source,
     voice_path,
     prompt_path,
     voice_rel,
@@ -483,10 +561,11 @@ import yaml
 ) = sys.argv[1:]
 
 minicpm_dir = Path(minicpm_dir)
+preset_path = Path(preset_path)
+manifest_path = Path(manifest_path)
+runtime_mode = runtime_mode == "1"
 voice_path = Path(voice_path)
 prompt_path = Path(prompt_path)
-preset_path = minicpm_dir / "assets" / "avatar_presets.yaml"
-manifest_path = minicpm_dir / "MANIFEST.sha256"
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -554,7 +633,11 @@ presets[preset_id] = {
     "prompt_file": prompt_rel,
     "order": next_order,
     "enabled": True,
+    "visibility": visibility,
+    "source": preset_source,
 }
+if owner_id:
+    presets[preset_id]["owner_id"] = owner_id
 
 yaml_text = yaml.safe_dump(
     config,
@@ -564,45 +647,46 @@ yaml_text = yaml.safe_dump(
 )
 atomic_write(preset_path, yaml_text.encode("utf-8"))
 
-try:
+if not runtime_mode:
     updates = {
         "./assets/avatar_presets.yaml": sha256(preset_path),
         f"./{voice_rel}": sha256(voice_path),
         f"./{prompt_rel}": sha256(prompt_path),
     }
-    lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = manifest_path.read_text(encoding="utf-8").splitlines()
 
-    def entry_path(line):
-        parts = line.split(maxsplit=1)
-        if len(parts) != 2 or len(parts[0]) != 64:
-            return None
-        return parts[1]
+        def entry_path(line):
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2 or len(parts[0]) != 64:
+                return None
+            return parts[1]
 
-    seen = set()
-    for index, line in enumerate(lines):
-        path = entry_path(line)
-        if path in updates:
-            lines[index] = f"{updates[path]}  {path}"
-            seen.add(path)
-
-    for path, digest in updates.items():
-        if path in seen:
-            continue
-        group = path.rsplit("/", 1)[0] + "/"
-        insert_at = None
+        seen = set()
         for index, line in enumerate(lines):
-            existing = entry_path(line)
-            if existing is not None and existing.startswith(group):
-                insert_at = index + 1
-        if insert_at is None:
-            lines.append(f"{digest}  {path}")
-        else:
-            lines.insert(insert_at, f"{digest}  {path}")
+            path = entry_path(line)
+            if path in updates:
+                lines[index] = f"{updates[path]}  {path}"
+                seen.add(path)
 
-    atomic_write(manifest_path, ("\n".join(lines) + "\n").encode("utf-8"))
-except Exception:
-    atomic_write(preset_path, original_preset)
-    raise
+        for path, digest in updates.items():
+            if path in seen:
+                continue
+            group = path.rsplit("/", 1)[0] + "/"
+            insert_at = None
+            for index, line in enumerate(lines):
+                existing = entry_path(line)
+                if existing is not None and existing.startswith(group):
+                    insert_at = index + 1
+            if insert_at is None:
+                lines.append(f"{digest}  {path}")
+            else:
+                lines.insert(insert_at, f"{digest}  {path}")
+
+        atomic_write(manifest_path, ("\n".join(lines) + "\n").encode("utf-8"))
+    except Exception:
+        atomic_write(preset_path, original_preset)
+        raise
 
 print(f"Preset OK: {preset_id} -> avatar={avatar_id}, order={next_order}")
 PY

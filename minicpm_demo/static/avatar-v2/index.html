@@ -27,6 +27,13 @@
         .transcript { height: 420px; overflow: auto; margin-top: 14px; display: grid; align-content: start; gap: 10px; }
         .message { padding: 12px; border-radius: 10px; background: #0e131d; line-height: 1.55; white-space: pre-wrap; }
         .message.assistant { border-left: 3px solid #5267ff; }
+        details { margin-bottom: 16px; }
+        summary { cursor: pointer; font-weight: 600; }
+        .create-form { display: grid; gap: 10px; margin-top: 12px; }
+        .create-form input, .create-form textarea { width: 100%; padding: 9px 10px; border: 1px solid #34415b; border-radius: 8px; background: #0b1018; color: inherit; }
+        .create-form textarea { min-height: 90px; resize: vertical; }
+        .create-form progress { width: 100%; accent-color: #5267ff; }
+        .create-hint { color: #8ea0c4; font-size: 12px; }
         @media (max-width: 760px) {
             .layout { grid-template-columns: 1fr; }
             .stage { max-height: 65vh; }
@@ -47,6 +54,19 @@
             <canvas id="avatarCanvas" width="768" height="1344" aria-label="数字人画面"></canvas>
         </section>
         <section class="panel">
+            <details>
+                <summary>创建我的数字人形象</summary>
+                <form class="create-form" id="createForm">
+                    <label>形象视频（最长 20 秒）<input id="customVideo" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required></label>
+                    <label>参考音频（最长 20 秒）<input id="customAudio" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg" required></label>
+                    <label>形象名称<input id="customName" type="text" maxlength="80" required></label>
+                    <label>形象说明<input id="customDescription" type="text" maxlength="300"></label>
+                    <label>提示词<textarea id="customPrompt" required></textarea></label>
+                    <button id="createButton" type="submit">上传并生成</button>
+                    <progress id="createProgress" max="100" value="0" hidden></progress>
+                    <span class="create-hint" id="createHint">视频和音频均不超过 20 秒</span>
+                </form>
+            </details>
             <label>
                 麦克风设备
                 <select id="micDevice"></select>
@@ -55,6 +75,9 @@
                 数字人预设
                 <select id="preset"></select>
             </label>
+            <button id="deletePreset" class="secondary" type="button" hidden>
+                删除当前自建形象
+            </button>
             <div class="buttons">
                 <button id="start">开始会话</button>
                 <button id="interrupt" class="secondary" disabled>打断</button>
@@ -67,6 +90,6 @@
         </section>
     </div>
 </main>
-<script type="module" src="/static/avatar-v2/app.js?v=session-api6"></script>
+<script type="module" src="/static/avatar-v2/app.js?v=avatar-delete1"></script>
 </body>
 </html>

@@ -34,6 +34,7 @@ load_dotenv(BASE_DIR / ".env")
 
 logger = logging.getLogger("minimal_platform")
 _SESSION_ID_RE = re.compile(r"^avs_[A-Za-z0-9_-]{1,80}$")
+_PRESET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 @dataclass(frozen=True)
@@ -41,9 +42,11 @@ class Settings:
     avatar_api_base_url: str
     avatar_api_key: str = ""
     avatar_ca_bundle: Optional[str] = None
+    avatar_owner_id: str = "platform-demo"
     upstream_timeout_seconds: float = 60.0
     max_request_body_bytes: int = 64 * 1024
     websocket_max_message_bytes: int = 16 * 1024 * 1024
+    customization_max_upload_bytes: int = 230 * 1024 * 1024
     allowed_origins: tuple[str, ...] = ()
 
     @classmethod
@@ -62,6 +65,10 @@ class Settings:
             avatar_api_base_url=base_url,
             avatar_api_key=os.getenv("AVATAR_API_KEY", "").strip(),
             avatar_ca_bundle=ca_bundle,
+            avatar_owner_id=os.getenv(
+                "PLATFORM_AVATAR_OWNER_ID",
+                "platform-demo",
+            ).strip() or "platform-demo",
             upstream_timeout_seconds=float(
                 os.getenv("UPSTREAM_TIMEOUT_SECONDS", "60")
             ),
@@ -72,6 +79,12 @@ class Settings:
                 os.getenv(
                     "WEBSOCKET_MAX_MESSAGE_BYTES",
                     str(16 * 1024 * 1024),
+                )
+            ),
+            customization_max_upload_bytes=int(
+                os.getenv(
+                    "CUSTOMIZATION_MAX_UPLOAD_BYTES",
+                    str(230 * 1024 * 1024),
                 )
             ),
             allowed_origins=origins,
@@ -95,6 +108,8 @@ class Settings:
             raise ValueError("MAX_REQUEST_BODY_BYTES must be > 0")
         if self.websocket_max_message_bytes <= 0:
             raise ValueError("WEBSOCKET_MAX_MESSAGE_BYTES must be > 0")
+        if self.customization_max_upload_bytes <= 0:
+            raise ValueError("CUSTOMIZATION_MAX_UPLOAD_BYTES must be > 0")
 
 
 def create_app(
@@ -134,7 +149,7 @@ def create_app(
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(configured.allowed_origins),
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["Content-Type"],
             allow_credentials=False,
         )
@@ -179,6 +194,23 @@ def create_app(
         try:
             response = await request.app.state.http_client.get(
                 _upstream_url(configured, "/v1/avatar/presets"),
+                headers=_upstream_headers(configured),
+            )
+        except Exception as exc:
+            return _upstream_error(exc)
+        return _pass_through(response)
+
+    @app.delete("/api/avatar/presets/{preset_id}")
+    async def delete_avatar_preset(preset_id: str, request: Request) -> Response:
+        _require_configured(request)
+        if not _PRESET_ID_RE.fullmatch(preset_id):
+            return _local_error(400, "invalid_preset_id", "Invalid preset id")
+        try:
+            response = await request.app.state.http_client.delete(
+                _upstream_url(
+                    configured,
+                    f"/v1/avatar/presets/{preset_id}",
+                ),
                 headers=_upstream_headers(configured),
             )
         except Exception as exc:
@@ -249,6 +281,93 @@ def create_app(
             local_stream = f"{local_stream}?{parsed_stream.query}"
         created["stream_url"] = local_stream
         return JSONResponse(created, status_code=response.status_code)
+
+    @app.post("/api/avatar/customizations", status_code=202)
+    async def proxy_create_customization(request: Request) -> Response:
+        _require_configured(request)
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                length = int(content_length)
+            except ValueError:
+                return _local_error(
+                    400,
+                    "invalid_content_length",
+                    "Invalid Content-Length",
+                )
+            if length > configured.customization_max_upload_bytes:
+                return _local_error(
+                    413,
+                    "upload_too_large",
+                    "Customization upload is too large",
+                )
+        headers = _upstream_headers(configured)
+        content_type = request.headers.get("content-type")
+        if content_type:
+            headers["Content-Type"] = content_type
+        if content_length:
+            headers["Content-Length"] = content_length
+        try:
+            upstream_request = request.app.state.http_client.build_request(
+                "POST",
+                _upstream_url(configured, "/v1/avatar/customizations"),
+                headers=headers,
+                content=request.stream(),
+            )
+            response = await request.app.state.http_client.send(
+                upstream_request,
+                stream=True,
+            )
+            try:
+                body = await response.aread()
+            finally:
+                await response.aclose()
+        except Exception as exc:
+            return _upstream_error(exc)
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers={
+                "Content-Type": response.headers.get(
+                    "content-type",
+                    "application/json",
+                ),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/api/avatar/customizations/{job_id}")
+    async def proxy_get_customization(job_id: str, request: Request) -> Response:
+        _require_configured(request)
+        try:
+            response = await request.app.state.http_client.get(
+                _upstream_url(
+                    configured,
+                    f"/v1/avatar/customizations/{job_id}",
+                ),
+                headers=_upstream_headers(configured),
+            )
+        except Exception as exc:
+            return _upstream_error(exc)
+        return _pass_through(response)
+
+    @app.delete("/api/avatar/customizations/{job_id}")
+    async def proxy_cancel_customization(
+        job_id: str,
+        request: Request,
+    ) -> Response:
+        _require_configured(request)
+        try:
+            response = await request.app.state.http_client.delete(
+                _upstream_url(
+                    configured,
+                    f"/v1/avatar/customizations/{job_id}",
+                ),
+                headers=_upstream_headers(configured),
+            )
+        except Exception as exc:
+            return _upstream_error(exc)
+        return _pass_through(response)
 
     @app.websocket("/api/avatar/sessions/{session_id}/stream")
     async def avatar_stream_proxy(websocket: WebSocket, session_id: str) -> None:
@@ -370,7 +489,10 @@ def _require_configured(request: Request) -> None:
 
 
 def _upstream_headers(settings: Settings) -> dict[str, str]:
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "X-Avatar-Owner-ID": settings.avatar_owner_id,
+    }
     if settings.avatar_api_key:
         headers["Authorization"] = f"Bearer {settings.avatar_api_key}"
     return headers

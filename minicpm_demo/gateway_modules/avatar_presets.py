@@ -34,6 +34,9 @@ class AvatarPresetSpec:
     prompt_file: str
     order: int
     enabled: bool
+    owner_id: Optional[str] = None
+    visibility: str = "public"
+    source: str = "system"
 
 
 @dataclass(frozen=True)
@@ -50,11 +53,17 @@ class AvatarPresetRegistry:
         self,
         project_root: str | Path,
         config_path: str = "assets/avatar_presets.yaml",
+        runtime_config_path: Optional[str] = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config_path = (self.project_root / config_path).resolve()
+        self.runtime_config_path = (
+            (self.project_root / runtime_config_path).resolve()
+            if runtime_config_path
+            else None
+        )
         self._lock = threading.RLock()
-        self._mtime_ns = -1
+        self._mtime_signature: tuple[Any, ...] = ()
         self._config: Optional[AvatarPresetConfig] = None
         self._voice_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
 
@@ -64,8 +73,11 @@ class AvatarPresetRegistry:
                 raise AvatarPresetError(
                     f"Avatar preset config not found: {self.config_path}"
                 )
-            stat = self.config_path.stat()
-            if self._config is not None and stat.st_mtime_ns == self._mtime_ns:
+            signature = (
+                self._file_signature(self.config_path),
+                self._file_signature(self.runtime_config_path),
+            )
+            if self._config is not None and signature == self._mtime_signature:
                 return self._config
 
             try:
@@ -74,63 +86,45 @@ class AvatarPresetRegistry:
                 raise AvatarPresetError(
                     f"Failed to parse avatar preset config: {exc}"
                 ) from exc
-            if not isinstance(raw, dict):
-                raise AvatarPresetError("Avatar preset config must be a YAML object")
-            if int(raw.get("version", 1)) != 1:
-                raise AvatarPresetError(
-                    f"Unsupported avatar preset config version: {raw.get('version')}"
+            presets = self._parse_presets(
+                raw,
+                self.config_path,
+                default_source="system",
+            )
+            runtime_default = ""
+            if self.runtime_config_path and self.runtime_config_path.is_file():
+                try:
+                    runtime_raw = yaml.safe_load(
+                        self.runtime_config_path.read_text(encoding="utf-8")
+                    )
+                except Exception as exc:
+                    raise AvatarPresetError(
+                        f"Failed to parse runtime avatar presets: {exc}"
+                    ) from exc
+                runtime_presets = self._parse_presets(
+                    runtime_raw,
+                    self.runtime_config_path,
+                    allow_empty=True,
+                    default_source="user",
                 )
-
-            raw_presets = raw.get("presets")
-            if not isinstance(raw_presets, dict) or not raw_presets:
-                raise AvatarPresetError("avatar_presets.presets must be a non-empty map")
-            if len(raw_presets) > 64:
+                existing_ids = {preset.id for preset in presets}
+                for preset in runtime_presets:
+                    if preset.id in existing_ids:
+                        raise AvatarPresetError(
+                            f"Duplicate avatar preset id: {preset.id}"
+                        )
+                    presets.append(preset)
+                    existing_ids.add(preset.id)
+                runtime_default = str(
+                    runtime_raw.get("default_preset") or ""
+                ).strip()
+            if len(presets) > 64:
                 raise AvatarPresetError("Too many avatar presets (maximum 64)")
 
-            presets: list[AvatarPresetSpec] = []
-            for preset_id, item in raw_presets.items():
-                preset_id = str(preset_id).strip()
-                if not _PRESET_ID_RE.fullmatch(preset_id):
-                    raise AvatarPresetError(f"Invalid preset id: {preset_id!r}")
-                if not isinstance(item, dict):
-                    raise AvatarPresetError(f"Preset {preset_id} must be a map")
-
-                avatar_id = str(item.get("avatar_id", "")).strip()
-                voice_ref = str(item.get("voice_ref", "")).strip()
-                prompt_file = str(item.get("prompt_file", "")).strip()
-                if not avatar_id:
-                    raise AvatarPresetError(f"Preset {preset_id}: avatar_id is required")
-                if not voice_ref:
-                    raise AvatarPresetError(f"Preset {preset_id}: voice_ref is required")
-                if not prompt_file:
-                    raise AvatarPresetError(f"Preset {preset_id}: prompt_file is required")
-                try:
-                    order = int(item.get("order", 999))
-                except (TypeError, ValueError) as exc:
-                    raise AvatarPresetError(
-                        f"Preset {preset_id}: order must be an integer"
-                    ) from exc
-                enabled = item.get("enabled", True)
-                if not isinstance(enabled, bool):
-                    raise AvatarPresetError(
-                        f"Preset {preset_id}: enabled must be true or false"
-                    )
-
-                presets.append(
-                    AvatarPresetSpec(
-                        id=preset_id,
-                        name=str(item.get("name") or preset_id).strip(),
-                        description=str(item.get("description") or "").strip(),
-                        avatar_id=avatar_id,
-                        voice_ref=voice_ref,
-                        prompt_file=prompt_file,
-                        order=order,
-                        enabled=enabled,
-                    )
-                )
-
             presets.sort(key=lambda preset: (preset.order, preset.name, preset.id))
-            default_id = str(raw.get("default_preset") or "").strip()
+            default_id = runtime_default or str(
+                raw.get("default_preset") or ""
+            ).strip()
             enabled_ids = {preset.id for preset in presets if preset.enabled}
             if default_id and default_id not in enabled_ids:
                 raise AvatarPresetError(
@@ -149,28 +143,155 @@ class AvatarPresetRegistry:
                 default_preset_id=default_id,
                 presets=tuple(presets),
             )
-            self._mtime_ns = stat.st_mtime_ns
+            self._mtime_signature = signature
             return self._config
 
-    def get(self, preset_id: str) -> AvatarPresetSpec:
+    def invalidate(self) -> None:
+        """Force the next access to reload both preset files."""
+        with self._lock:
+            self._config = None
+            self._mtime_signature = ()
+            self._voice_cache.clear()
+
+    @staticmethod
+    def _file_signature(path: Optional[Path]) -> tuple[int, int]:
+        if path is None or not path.is_file():
+            return (0, 0)
+        stat = path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+
+    @staticmethod
+    def _parse_presets(
+        raw: Any,
+        source: Path,
+        *,
+        allow_empty: bool = False,
+        default_source: str = "system",
+    ) -> list[AvatarPresetSpec]:
+        if not isinstance(raw, dict):
+            raise AvatarPresetError(
+                f"Avatar preset config must be a YAML object: {source}"
+            )
+        if int(raw.get("version", 1)) != 1:
+            raise AvatarPresetError(
+                f"Unsupported avatar preset config version: {raw.get('version')}"
+            )
+        raw_presets = raw.get("presets")
+        if not isinstance(raw_presets, dict):
+            raise AvatarPresetError(
+                f"avatar presets must be a map in {source}"
+            )
+        if not raw_presets and not allow_empty:
+            raise AvatarPresetError("avatar_presets.presets must be a non-empty map")
+
+        presets: list[AvatarPresetSpec] = []
+        for preset_id, item in raw_presets.items():
+            preset_id = str(preset_id).strip()
+            if not _PRESET_ID_RE.fullmatch(preset_id):
+                raise AvatarPresetError(f"Invalid preset id: {preset_id!r}")
+            if not isinstance(item, dict):
+                raise AvatarPresetError(f"Preset {preset_id} must be a map")
+            avatar_id = str(item.get("avatar_id", "")).strip()
+            voice_ref = str(item.get("voice_ref", "")).strip()
+            prompt_file = str(item.get("prompt_file", "")).strip()
+            if not avatar_id:
+                raise AvatarPresetError(f"Preset {preset_id}: avatar_id is required")
+            if not voice_ref:
+                raise AvatarPresetError(f"Preset {preset_id}: voice_ref is required")
+            if not prompt_file:
+                raise AvatarPresetError(f"Preset {preset_id}: prompt_file is required")
+            try:
+                order = int(item.get("order", 999))
+            except (TypeError, ValueError) as exc:
+                raise AvatarPresetError(
+                    f"Preset {preset_id}: order must be an integer"
+                ) from exc
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise AvatarPresetError(
+                    f"Preset {preset_id}: enabled must be true or false"
+                )
+            owner_id = str(item.get("owner_id") or "").strip() or None
+            preset_source = str(
+                item.get("source") or default_source
+            ).lower()
+            if preset_source not in {"system", "user"}:
+                raise AvatarPresetError(
+                    f"Preset {preset_id}: source must be system or user"
+                )
+            if preset_source == "user" and not owner_id:
+                owner_id = "anonymous"
+            visibility = str(
+                item.get("visibility")
+                or (
+                    "private"
+                    if preset_source == "user" or owner_id
+                    else "public"
+                )
+            ).lower()
+            if visibility not in {"public", "private"}:
+                raise AvatarPresetError(
+                    f"Preset {preset_id}: visibility must be public or private"
+                )
+            presets.append(
+                AvatarPresetSpec(
+                    id=preset_id,
+                    name=str(item.get("name") or preset_id).strip(),
+                    description=str(item.get("description") or "").strip(),
+                    avatar_id=avatar_id,
+                    voice_ref=voice_ref,
+                    prompt_file=prompt_file,
+                    order=order,
+                    enabled=enabled,
+                    owner_id=owner_id,
+                    visibility=visibility,
+                    source=preset_source,
+                )
+            )
+        return presets
+
+    def get(
+        self,
+        preset_id: str,
+        owner_id: Optional[str] = None,
+    ) -> AvatarPresetSpec:
         for preset in self.load().presets:
-            if preset.id == preset_id and preset.enabled:
+            if (
+                preset.id == preset_id
+                and preset.enabled
+                and (
+                    preset.visibility == "public"
+                    or (owner_id and preset.owner_id == owner_id)
+                )
+            ):
                 return preset
         raise AvatarPresetError(
             f"Avatar preset not found: {preset_id}",
             status_code=404,
         )
 
-    def public_list(self, avatar_status: Dict[str, Any]) -> Dict[str, Any]:
+    def public_list(
+        self,
+        avatar_status: Dict[str, Any],
+        owner_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         config = self.load()
         cache_by_id = {
             str(item.get("id")): item
             for item in avatar_status.get("avatars", [])
         }
         items = [
-            self._public_item(preset, cache_by_id.get(preset.avatar_id))
+            self._public_item(
+                preset,
+                cache_by_id.get(preset.avatar_id),
+                owner_id,
+            )
             for preset in config.presets
             if preset.enabled
+            and (
+                preset.visibility == "public"
+                or (owner_id and preset.owner_id == owner_id)
+            )
         ]
         return {
             "default_preset_id": config.default_preset_id,
@@ -183,13 +304,18 @@ class AvatarPresetRegistry:
         self,
         preset_id: str,
         avatar_status: Dict[str, Any],
+        owner_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        preset = self.get(preset_id)
+        preset = self.get(preset_id, owner_id)
         cache_by_id = {
             str(item.get("id")): item
             for item in avatar_status.get("avatars", [])
         }
-        item = self._public_item(preset, cache_by_id.get(preset.avatar_id))
+        item = self._public_item(
+            preset,
+            cache_by_id.get(preset.avatar_id),
+            owner_id,
+        )
         if not item["available"]:
             raise AvatarPresetError(
                 item["error"] or f"Avatar preset is unavailable: {preset_id}",
@@ -197,8 +323,12 @@ class AvatarPresetRegistry:
             )
         return item
 
-    def voice_audio(self, preset_id: str) -> Dict[str, Any]:
-        preset = self.get(preset_id)
+    def voice_audio(
+        self,
+        preset_id: str,
+        owner_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        preset = self.get(preset_id, owner_id)
         path = self._resolve_path(preset.voice_ref)
         if not path.is_file():
             raise AvatarPresetError(
@@ -240,6 +370,7 @@ class AvatarPresetRegistry:
         self,
         preset: AvatarPresetSpec,
         cache: Optional[Dict[str, Any]],
+        owner_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         errors: list[str] = []
         prompt_payload: Optional[Dict[str, Any]] = None
@@ -279,6 +410,14 @@ class AvatarPresetRegistry:
             "cache": cache_payload,
             "prompt": prompt_payload,
             "voice": voice_payload,
+            "visibility": preset.visibility,
+            "source": preset.source,
+            "custom": preset.source == "user",
+            "deletable": (
+                preset.source == "user"
+                and bool(owner_id)
+                and preset.owner_id == owner_id
+            ),
         }
 
     def _read_prompt(self, preset: AvatarPresetSpec) -> Dict[str, Any]:

@@ -39,6 +39,22 @@ AVATAR_SESSION_MAX_SECONDS=600
 # Leave empty for same-origin deployments.
 AVATAR_SESSION_ALLOWED_ORIGINS=
 
+# Front-end avatar customization jobs.
+AVATAR_CUSTOMIZATION_ENABLED=true
+# Relative paths are resolved from minicpm_demo/, not from the shell CWD.
+AVATAR_CUSTOMIZATION_DATA_ROOT=data/avatar_customizations
+# Optional explicit override. Defaults to
+# ${AVATAR_CUSTOMIZATION_DATA_ROOT}/avatar_presets.user.yaml.
+# AVATAR_RUNTIME_PRESET_FILE=
+AVATAR_CUSTOMIZATION_GPU=
+AVATAR_CUSTOMIZATION_ALLOW_BUSY=false
+AVATAR_CUSTOMIZATION_MIN_FREE_MB=12000
+AVATAR_CUSTOMIZATION_VIDEO_MAX_SECONDS=20
+AVATAR_CUSTOMIZATION_AUDIO_MAX_SECONDS=20
+AVATAR_CUSTOMIZATION_VIDEO_MAX_MB=200
+AVATAR_CUSTOMIZATION_AUDIO_MAX_MB=20
+AVATAR_CUSTOMIZATION_PROMPT_MAX_BYTES=65536
+
 # The 720p knowledge-sharing avatar is the default. To use the original avatar
 # cache as a fallback, uncomment this override.
 # MUSETALK_CONFIG=configs/streaming_duplex.yaml

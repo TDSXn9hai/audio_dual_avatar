@@ -8,6 +8,8 @@ const source = await fs.readFile(
 );
 const events = [];
 let requestedConstraints = null;
+let customizationRequest = null;
+let customizationQuery = null;
 
 globalThis.AudioContext = class {
     constructor(options = {}) {
@@ -74,6 +76,47 @@ Object.defineProperty(globalThis, 'navigator', {
     },
 });
 globalThis.location = { origin: 'https://example.test' };
+globalThis.XMLHttpRequest = class {
+    constructor() {
+        this.upload = {};
+    }
+    open(method, url) {
+        this.method = method;
+        this.url = url;
+    }
+    setRequestHeader(name, value) {
+        this.headers = { ...this.headers, [name]: value };
+    }
+    send(body) {
+        customizationRequest = {
+            method: this.method,
+            url: this.url,
+            headers: this.headers,
+            body,
+        };
+        this.upload.onprogress?.({
+            lengthComputable: true,
+            loaded: 5,
+            total: 10,
+        });
+        this.status = 202;
+        this.responseText = JSON.stringify({
+            job_id: 'acj_0123456789abcdef0123',
+            status: 'queued',
+        });
+        this.onload();
+    }
+};
+globalThis.fetch = async (url, options) => {
+    customizationQuery = { url: String(url), options };
+    return {
+        ok: true,
+        json: async () => ({
+            job_id: 'acj_0123456789abcdef0123',
+            status: 'ready',
+        }),
+    };
+};
 
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const { AvatarSessionClient } = await import(moduleUrl);
@@ -111,4 +154,65 @@ await client.startMicrophone();
 assert.equal(events.includes('worklet:start'), true);
 client.close();
 
-console.log('AvatarSessionClient microphone preparation checks passed');
+let uploadProgress = 0;
+const video = new Blob(['video'], { type: 'video/mp4' });
+video.name = 'face.mp4';
+const audio = new Blob(['audio'], { type: 'audio/wav' });
+audio.name = 'voice.wav';
+const job = await AvatarSessionClient.createCustomization({
+    baseUrl: 'https://example.test',
+    apiPrefix: '/v1/avatar',
+    ownerId: 'user-a',
+    video,
+    audio,
+    prompt: 'prompt',
+    name: 'avatar',
+    description: 'description',
+    onProgress: (ratio) => {
+        uploadProgress = ratio;
+    },
+});
+assert.equal(job.status, 'queued');
+assert.equal(uploadProgress, 0.5);
+assert.equal(customizationRequest.method, 'POST');
+assert.equal(
+    String(customizationRequest.url),
+    'https://example.test/v1/avatar/customizations',
+);
+assert.equal(customizationRequest.headers['X-Avatar-Owner-ID'], 'user-a');
+assert.equal(customizationRequest.body.get('prompt'), 'prompt');
+assert.equal(customizationRequest.body.get('video').name, 'face.mp4');
+
+const queried = await AvatarSessionClient.getCustomization({
+    baseUrl: 'https://example.test',
+    apiPrefix: '/v1/avatar',
+    ownerId: 'user-a',
+    jobId: job.job_id,
+});
+assert.equal(queried.status, 'ready');
+assert.equal(
+    customizationQuery.url,
+    `https://example.test/v1/avatar/customizations/${job.job_id}`,
+);
+assert.equal(
+    customizationQuery.options.headers['X-Avatar-Owner-ID'],
+    'user-a',
+);
+
+const deleted = await AvatarSessionClient.deletePreset({
+    baseUrl: 'https://example.test',
+    ownerId: 'user-a',
+    presetId: 'up_123',
+});
+assert.equal(deleted.status, 'ready');
+assert.equal(
+    customizationQuery.url,
+    'https://example.test/v1/avatar/presets/up_123',
+);
+assert.equal(customizationQuery.options.method, 'DELETE');
+assert.equal(
+    customizationQuery.options.headers['X-Avatar-Owner-ID'],
+    'user-a',
+);
+
+console.log('AvatarSessionClient microphone, customization and preset deletion checks passed');

@@ -124,6 +124,46 @@ def test_avatar_player_supports_h264_webcodecs_and_webp_fallback():
     assert "this.videoCodec = 'webp'" in player
 
 
+def test_avatar_customization_project_root_is_repository_root():
+    import gateway
+
+    assert gateway._avatar_customization_project_root() == DEMO_ROOT.parent
+
+
+def test_avatar_preset_delete_routes_and_frontends_are_wired():
+    import gateway
+
+    routes = {
+        (route.path, tuple(sorted(route.methods or [])))
+        for route in gateway.app.routes
+        if getattr(route, "path", "").startswith(("/v1/avatar/presets", "/avatar-live/api/avatar-presets"))
+    }
+    assert (
+        "/v1/avatar/presets/{preset_id}",
+        ("DELETE",),
+    ) in routes
+    assert (
+        "/avatar-live/api/avatar-presets/{preset_id}",
+        ("DELETE",),
+    ) in routes
+
+    avatar_app = (
+        DEMO_ROOT / "static" / "avatar" / "avatar-app.js"
+    ).read_text()
+    avatar_v2_app = (
+        DEMO_ROOT / "static" / "avatar-v2" / "app.js"
+    ).read_text()
+    sdk = (
+        DEMO_ROOT / "static" / "sdk" / "avatar-session-client.js"
+    ).read_text()
+    assert "deleteAvatarPreset" in avatar_app
+    assert "deleteSelectedPreset" in avatar_v2_app
+    assert "static async deletePreset" in sdk
+    add_avatar = (DEMO_ROOT.parent / "add_avatar.sh").read_text()
+    assert 'PRESET_SOURCE="user"' in add_avatar
+    assert '"source": preset_source' in add_avatar
+
+
 def test_avatar_preset_selector_is_above_prompt_and_binds_voice():
     page = (DEMO_ROOT / "static" / "avatar" / "avatar.html").read_text()
     app = (DEMO_ROOT / "static" / "avatar" / "avatar-app.js").read_text()
