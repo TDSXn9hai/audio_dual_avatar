@@ -2,16 +2,22 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${DEMO_PORT:-8006}"
+GATEWAY_PORT="${DEMO_PORT:-8006}"
+GATEWAY_INTERNAL_PORT="${GATEWAY_INTERNAL_PORT:-8007}"
+BACKEND_PORT="${BACKEND_PORT:-22500}"
+WORKER_PORT="${WORKER_PORT:-22400}"
 
 echo "Gateway:"
-curl -sk --max-time 5 "https://127.0.0.1:${PORT}/status" || true
+curl -sk --max-time 5 "https://127.0.0.1:${GATEWAY_PORT}/status" || true
 echo
 echo "Backend:"
-curl -s --max-time 5 http://127.0.0.1:22500/health || true
+curl -s --max-time 5 "http://127.0.0.1:${BACKEND_PORT}/health" || true
 echo
 echo "Worker:"
-curl -s --max-time 5 http://127.0.0.1:22400/health || true
+curl -s --max-time 5 "http://127.0.0.1:${WORKER_PORT}/health" || true
+echo
+echo "Gateway internal:"
+curl -s --max-time 5 "http://127.0.0.1:${GATEWAY_INTERNAL_PORT}/health" || true
 echo
 echo "PIDs:"
 for name in gateway backend worker; do
