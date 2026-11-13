@@ -38,6 +38,14 @@ for name in worker backend gateway; do
         "${pid_file}" "$(pid_marker_for "${name}")" "${name}" 30
 done
 
+for marker in gateway.py py_backend.server worker.py; do
+    while IFS= read -r pid; do
+        [[ -n "${pid}" ]] || continue
+        service_pid_is_active "${pid}" || continue
+        service_stop_pid "${pid}" "${marker}" "${marker}" 30
+    done < <(service_find_workspace_pids "${marker}" "${DEMO_DIR}")
+done
+
 for name in worker backend gateway; do
     while IFS= read -r port; do
         if ! service_wait_port_free "${port}" 30; then

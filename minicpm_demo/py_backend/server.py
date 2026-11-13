@@ -13,6 +13,7 @@ import asyncio
 import base64
 import json
 import logging
+import socket
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
@@ -38,6 +39,19 @@ logger = logging.getLogger("backend_server")
 SERVER_CONFIG: Dict[str, Any] = {}
 _backend: Any = None
 _server_state: Optional["BackendServerState"] = None
+
+
+def _create_server_socket(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    server_socket = socket.socket(family, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server_socket.bind((host, port))
+        server_socket.listen(socket.SOMAXCONN)
+    except BaseException:
+        server_socket.close()
+        raise
+    return server_socket
 
 
 def _payload(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -691,7 +705,17 @@ def main() -> None:
         "attn_implementation": cfg.attn_implementation,
     })
 
-    uvicorn.run(app, host=args.host, port=args.port, ws_max_size=128 * 1024 * 1024)
+    server_socket = _create_server_socket(args.host, args.port)
+    try:
+        config = uvicorn.Config(
+            app,
+            host=args.host,
+            port=args.port,
+            ws_max_size=128 * 1024 * 1024,
+        )
+        uvicorn.Server(config).run(sockets=[server_socket])
+    finally:
+        server_socket.close()
 
 
 if __name__ == "__main__":

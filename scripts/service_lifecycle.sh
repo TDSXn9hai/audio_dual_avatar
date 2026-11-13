@@ -14,6 +14,32 @@ service_pid_is_owned() {
     [[ "${cmdline}" == *"${marker}"* ]]
 }
 
+service_find_workspace_pids() {
+    local marker="${1:-}"
+    local workspace="${2:-}"
+    local proc_dir pid cmdline executable cwd
+
+    [[ -n "${marker}" && -n "${workspace}" ]] || return 0
+    workspace="$(readlink -f "${workspace}")" || return 1
+
+    for proc_dir in /proc/[0-9]*; do
+        pid="${proc_dir##*/}"
+        [[ "${pid}" != "$$" ]] || continue
+        cmdline="$(tr '\0' ' ' < "${proc_dir}/cmdline" 2>/dev/null)" || continue
+        [[ "${cmdline}" == *"${marker}"* ]] || continue
+
+        executable="$(readlink "${proc_dir}/exe" 2>/dev/null)" || continue
+        case "$(basename "${executable}")" in
+            python*) ;;
+            *) continue ;;
+        esac
+
+        cwd="$(readlink "${proc_dir}/cwd" 2>/dev/null)" || continue
+        [[ "${cwd}" == "${workspace}" || "${cwd}" == "${workspace}/"* ]] || continue
+        echo "${pid}"
+    done 2>/dev/null | sort -n
+}
+
 service_acquire_lock() {
     local lock_file="${1:-}"
     local timeout="${2:-10}"
@@ -102,6 +128,23 @@ service_wait_process_exit() {
     done
 }
 
+service_stop_pid() {
+    local pid="${1:-}"
+    local marker="${2:-}"
+    local label="${3:-process}"
+    local timeout="${4:-30}"
+
+    service_pid_is_owned "${pid}" "${marker}" || return 1
+    service_pid_is_active "${pid}" || return 0
+    echo "Stopping ${label}: pid ${pid}"
+    kill "${pid}" 2>/dev/null || true
+    if ! service_wait_process_exit "${pid}" "${timeout}"; then
+        echo "${label}: did not exit after ${timeout}s, sending SIGKILL" >&2
+        kill -KILL "${pid}" 2>/dev/null || true
+        service_wait_process_exit "${pid}" 5 || return 1
+    fi
+}
+
 service_stop_pid_file() {
     local pid_file="${1:-}"
     local marker="${2:-}"
@@ -118,14 +161,7 @@ service_stop_pid_file() {
         return 0
     fi
 
-    echo "Stopping ${label}: pid ${pid}"
-    kill "${pid}" 2>/dev/null || true
-    if ! service_wait_process_exit "${pid}" "${timeout}"; then
-        echo "${label}: did not exit after ${timeout}s, sending SIGKILL" >&2
-        kill -KILL "${pid}" 2>/dev/null || true
-        service_wait_process_exit "${pid}" 5 || return 1
-    fi
-
+    service_stop_pid "${pid}" "${marker}" "${label}" "${timeout}"
     rm -f "${pid_file}"
 }
 

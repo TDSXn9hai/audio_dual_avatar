@@ -118,6 +118,49 @@ any_service_owned() {
     return 1
 }
 
+service_pid_is_registered() {
+    local target_pid="$1"
+    local name pid_file candidate_pid marker
+
+    for name in gateway backend worker; do
+        pid_file="$(pid_file_for "${name}")"
+        [[ -s "${pid_file}" ]] || continue
+        candidate_pid="$(cat "${pid_file}")"
+        marker="$(pid_marker_for "${name}")"
+        if [[ "${candidate_pid}" == "${target_pid}" ]] \
+            && service_pid_is_owned "${candidate_pid}" "${marker}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+unregistered_service_pids() {
+    local marker pid
+    for marker in gateway.py py_backend.server worker.py; do
+        while IFS= read -r pid; do
+            [[ -n "${pid}" ]] || continue
+            service_pid_is_registered "${pid}" || printf '%s %s\n' "${pid}" "${marker}"
+        done < <(service_find_workspace_pids "${marker}" "${DEMO_DIR}")
+    done
+}
+
+print_unregistered_service_pids() {
+    local pid marker
+    while read -r pid marker; do
+        [[ -n "${pid}" ]] || continue
+        echo "Unregistered ${marker} process:" >&2
+        ps -p "${pid}" -o pid=,ppid=,lstart=,args= >&2 || true
+    done < <(unregistered_service_pids)
+}
+
+assert_no_unregistered_service_processes() {
+    [[ -z "$(unregistered_service_pids)" ]] && return 0
+    echo "Detected an unregistered MiniCPM-o service process before backend startup:" >&2
+    print_unregistered_service_pids
+    return 1
+}
+
 port_has_expected_owner() {
     local port="$1"
     local name="$2"
@@ -174,16 +217,22 @@ print_unknown_listeners() {
     done
 }
 
+check_service_ports_free() {
+    local name="$1"
+    local port
+    while IFS= read -r port; do
+        if service_port_is_listening "${port}"; then
+            echo "Port ${port} is already in use:" >&2
+            service_print_port_owner "${port}" >&2
+            return 1
+        fi
+    done < <(ports_for "${name}")
+}
+
 check_ports_free() {
-    local name port
+    local name
     for name in gateway backend worker; do
-        while IFS= read -r port; do
-            if service_port_is_listening "${port}"; then
-                echo "Port ${port} is already in use:" >&2
-                service_print_port_owner "${port}" >&2
-                return 1
-            fi
-        done < <(ports_for "${name}")
+        check_service_ports_free "${name}"
     done
 }
 
@@ -222,7 +271,15 @@ export PATH="${DEMO_DIR}/.bin:${PATH}"
 
 service_acquire_lock "${LOCK_FILE}" 10
 
-if all_services_healthy; then
+if [[ -n "$(unregistered_service_pids)" ]]; then
+    echo "Detected unregistered MiniCPM-o service processes:"
+    print_unregistered_service_pids
+    echo "检测到未登记的 MiniCPM-o 残留服务进程，正在自动清理并重启..."
+    if ! "${DEMO_DIR}/stop_all.sh"; then
+        echo "Failed to clean unregistered MiniCPM-o processes." >&2
+        exit 1
+    fi
+elif all_services_healthy; then
     echo "MiniCPM-o demo is already running and healthy."
     exit 0
 fi
@@ -290,6 +347,9 @@ service_wait_http \
     "http://127.0.0.1:${GATEWAY_INTERNAL_PORT}/health" "gateway internal" \
     "${gateway_pid}" "${LOG_DIR}/gateway.log" 120
 
+assert_no_unregistered_service_processes
+check_service_ports_free backend
+
 start_process backend env \
     CUDA_VISIBLE_DEVICES="${MINICPM_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}" \
     "${PYTHON}" -m py_backend.server \
@@ -303,6 +363,8 @@ backend_pid="$(pid_value_for backend)"
 service_wait_http \
     "http://127.0.0.1:${BACKEND_PORT}/health" "backend" \
     "${backend_pid}" "${LOG_DIR}/backend.log" 600
+
+check_service_ports_free worker
 
 start_process worker \
     "${PYTHON}" worker.py \

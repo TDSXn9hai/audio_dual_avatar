@@ -55,6 +55,17 @@ time.sleep(30)
     fail "listener did not report its port"
 }
 
+start_python_sleeper() {
+    local directory="$1"
+    local marker="$2"
+    (
+        cd "${directory}"
+        exec python -c 'import time; time.sleep(30)' "${marker}"
+    ) </dev/null >/dev/null 2>&1 &
+    SPAWNED_PID="$!"
+    cleanup_pids+=("${SPAWNED_PID}")
+}
+
 test_pid_ownership_rejects_unrelated_process() {
     local owned_pid unrelated_pid
     start_tagged_sleep "avatar-lifecycle-owned"
@@ -148,6 +159,21 @@ test_stop_pid_file_terminates_owned_process() {
     pass "owned process is stopped and its PID file removed"
 }
 
+test_stop_pid_terminates_owned_process_without_pid_file() {
+    local owned_pid
+    start_tagged_sleep "avatar-lifecycle-orphan-stop"
+    owned_pid="${SPAWNED_PID}"
+
+    service_stop_pid "${owned_pid}" "avatar-lifecycle-orphan-stop" "orphan" 3 \
+        || fail "owned orphan process could not be stopped"
+
+    if kill -0 "${owned_pid}" 2>/dev/null; then
+        fail "owned orphan process ${owned_pid} is still running"
+    fi
+
+    pass "owned process is stopped without requiring a PID file"
+}
+
 test_stop_pid_file_does_not_signal_foreign_process() {
     local pid_file="${TMP_DIR}/foreign.pid"
     local foreign_pid
@@ -187,11 +213,33 @@ test_wait_http_fails_fast_when_process_exits() {
     pass "HTTP wait fails fast when its process exits"
 }
 
+test_workspace_process_detection_ignores_other_directories() {
+    local workspace="${TMP_DIR}/workspace"
+    local outside="${TMP_DIR}/outside"
+    local inside_pid outside_pid detected
+    mkdir -p "${workspace}" "${outside}"
+
+    start_python_sleeper "${workspace}" "avatar-lifecycle-orphan"
+    inside_pid="${SPAWNED_PID}"
+    start_python_sleeper "${outside}" "avatar-lifecycle-orphan"
+    outside_pid="${SPAWNED_PID}"
+
+    detected="$(
+        service_find_workspace_pids "avatar-lifecycle-orphan" "${workspace}"
+    )"
+    [[ "${detected}" == "${inside_pid}" ]] \
+        || fail "workspace scan returned '${detected}', expected ${inside_pid} (outside=${outside_pid})"
+
+    pass "workspace process scan ignores identical processes elsewhere"
+}
+
 test_pid_ownership_rejects_unrelated_process
 test_port_listener_is_detected
 test_port_listener_pid_is_reported
 test_wait_port_free_succeeds_after_listener_exits
 test_wait_port_free_fails_while_listener_remains
 test_stop_pid_file_terminates_owned_process
+test_stop_pid_terminates_owned_process_without_pid_file
 test_stop_pid_file_does_not_signal_foreign_process
 test_wait_http_fails_fast_when_process_exits
+test_workspace_process_detection_ignores_other_directories

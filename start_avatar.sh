@@ -139,6 +139,48 @@ any_service_owned() {
     return 1
 }
 
+service_pid_is_registered() {
+    local target_pid="$1"
+    local name pid_file candidate_pid marker
+
+    if service_pid_is_owned "${target_pid}" "stream_server.py" \
+        && [[ -s "${MUSETALK_PID}" ]] \
+        && [[ "$(cat "${MUSETALK_PID}")" == "${target_pid}" ]]; then
+        return 0
+    fi
+
+    for name in gateway backend worker; do
+        pid_file="$(minicpm_pid_file "${name}")"
+        [[ -s "${pid_file}" ]] || continue
+        candidate_pid="$(cat "${pid_file}")"
+        marker="$(minicpm_marker "${name}")"
+        if [[ "${candidate_pid}" == "${target_pid}" ]] \
+            && service_pid_is_owned "${candidate_pid}" "${marker}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+unregistered_service_pids() {
+    local marker pid
+    for marker in stream_server.py gateway.py py_backend.server worker.py; do
+        while IFS= read -r pid; do
+            [[ -n "${pid}" ]] || continue
+            service_pid_is_registered "${pid}" || printf '%s %s\n' "${pid}" "${marker}"
+        done < <(service_find_workspace_pids "${marker}" "${ROOT}")
+    done
+}
+
+print_unregistered_service_pids() {
+    local pid marker
+    while read -r pid marker; do
+        [[ -n "${pid}" ]] || continue
+        echo "Unregistered ${marker} process:" >&2
+        ps -p "${pid}" -o pid=,ppid=,lstart=,args= >&2 || true
+    done < <(unregistered_service_pids)
+}
+
 port_has_expected_owner() {
     local port="$1"
     local name="$2"
@@ -335,6 +377,7 @@ start_minicpm() {
 
 stop_all() {
     local rc=0
+    local marker pid
 
     DEMO_PORT="${GATEWAY_PORT}" \
     GATEWAY_INTERNAL_PORT="${GATEWAY_INTERNAL_PORT}" \
@@ -344,6 +387,15 @@ stop_all() {
 
     service_stop_pid_file \
         "${MUSETALK_PID}" "stream_server.py" "MuseTalk" 60 || rc=1
+
+    for marker in stream_server.py gateway.py py_backend.server worker.py; do
+        while IFS= read -r pid; do
+            [[ -n "${pid}" ]] || continue
+            service_pid_is_active "${pid}" || continue
+            service_stop_pid "${pid}" "${marker}" "${marker}" 60 || rc=1
+        done < <(service_find_workspace_pids "${marker}" "${ROOT}")
+    done
+
     if ! service_wait_port_free "${MUSETALK_PORT}" 60; then
         echo "MuseTalk: port ${MUSETALK_PORT} is still in use after shutdown" >&2
         service_print_port_owner "${MUSETALK_PORT}" >&2
@@ -365,7 +417,15 @@ case "${1:-start}" in
 
         service_acquire_lock "${LOCK_FILE}" 10
 
-        if all_services_healthy; then
+        if [[ -n "$(unregistered_service_pids)" ]]; then
+            echo "Detected unregistered digital-human service processes:"
+            print_unregistered_service_pids
+            echo "检测到未登记的残留服务进程，正在自动清理并重启..."
+            if ! stop_all; then
+                echo "Failed to clean unregistered service processes." >&2
+                exit 1
+            fi
+        elif all_services_healthy; then
             echo "Digital human services are already running and healthy."
             print_service_states
             exit 0
