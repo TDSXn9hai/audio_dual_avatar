@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 import uuid
@@ -26,6 +27,29 @@ _VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".m4v"}
 _AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".flac", ".ogg"}
 _STEP_RE = re.compile(r"==>\s*\[(\d)/6\]")
 _STEP_PROGRESS = {1: 25, 2: 35, 3: 45, 4: 80, 5: 92, 6: 100}
+
+
+async def _terminate_process_tree(
+    process: asyncio.subprocess.Process,
+    *,
+    timeout: float = 10.0,
+) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    await process.wait()
 
 
 class AvatarCustomizationError(RuntimeError):
@@ -123,8 +147,7 @@ class AvatarCustomizationService:
 
     async def stop(self) -> None:
         for process in list(self._processes.values()):
-            if process.returncode is None:
-                process.terminate()
+            await _terminate_process_tree(process)
         if self._worker_task is not None:
             self._worker_task.cancel()
             try:
@@ -283,7 +306,7 @@ class AvatarCustomizationService:
             job.finished_at = time.time()
             self._write_job(job)
         if process is not None and process.returncode is None:
-            process.terminate()
+            await _terminate_process_tree(process)
         if process is None:
             self._cleanup_uploads(job)
         return job
@@ -369,6 +392,7 @@ class AvatarCustomizationService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
+                start_new_session=True,
             )
             self._processes[job_id] = process
         assert process.stdout is not None
