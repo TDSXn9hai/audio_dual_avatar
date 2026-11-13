@@ -236,15 +236,16 @@ data/audio/ 新文件
             ├─ 恢复队列（priority 1）
             └─ 普通队列（priority 2）
 
-推理线程                        编码线程
+推理线程                        融合线程（H.264）                编码线程
 采样计数 → PTS
   ├─ 默认 VAD 关闭：全部帧 Whisper → UNet → VAE decode
   └─ enable_vad=true：静音帧直接使用 avatar 原帧
-                              →  人脸融合 → JPEG encode
+                              → raw_queue → 人脸融合/resize
+                              → fused_queue → H.264 / WebP encode
             │
             └─ WebSocket /ws/live
                  ├─ 文本控制消息
-                 └─ 带 PTS 的二进制 JPEG 帧
+                 └─ 带 PTS 的 MTH1 H.264 或 MTF1 WebP/JPEG 帧
 
 浏览器
   ├─ Canvas 渲染
@@ -256,7 +257,9 @@ data/audio/ 新文件
 设计要点：
 
 - 模型和 avatar 缓存只加载一次，服务启动后常驻显存/内存。
-- 推理线程和融合/编码线程分离，GPU 推理与 CPU 后处理重叠。
+- 推理线程和编码线程分离，GPU 推理与 CPU 后处理重叠。
+- H.264 路径额外使用一个固定单融合线程和容量为 8 的 `fused_queue`，
+  使 CPU 帧融合与有状态的 H.264 raw frame 写入重叠；WebP/JPEG 保持原路径。
 - 音频采样计数是主时钟；第 k 帧覆盖采样窗口
   `[k*sample_rate/fps, (k+1)*sample_rate/fps)`，帧头 PTS 为
   `round(global_frame*1e6/fps)` 微秒。
@@ -277,7 +280,7 @@ data/audio/ 新文件
 | `stream_server.py` | 兼容启动入口，保留 `app`、`STATE` 和 `python stream_server.py` 用法 |
 | `muse_stream/api/` | FastAPI 应用组装、HTTP 路由和 WebSocket 直播会话 |
 | `muse_stream/audio/` | 音频转码、语音分析、段队列、打断恢复和目录输入 |
-| `muse_stream/inference/` | 逐段推理、帧融合、推理线程和 JPEG 编码线程 |
+| `muse_stream/inference/` | 逐段推理、H.264 单融合线程、编码线程和有序发送 |
 | `muse_stream/models.py` | 模型、Whisper、avatar 加载与 warmup |
 | `muse_stream/config.py` | 配置解析、校验和应用状态初始化 |
 | `muse_stream/state.py` | 服务、模型、流水线、打断、观众和输入状态 |
@@ -702,6 +705,19 @@ output/code_snapshot/
 `output/benchmark_stages.md` 和 `output/benchmark_stages.json`。
 
 ## 12. 变更记录
+
+### 2026-11-12
+
+- H.264 直播路径新增固定单线程异步融合阶段：`raw_queue → fusion → fused_queue
+  → encode`。`fused_queue` 容量固定为 8，当前不启用多融合线程。
+- H.264 的帧融合和 raw frame submit 不再阻塞在同一线程；H.264 顺序提交、
+  HOLD、cancel、flush epoch、编码器重启和有序发送仍由单编码线程负责。
+- WebP/JPEG 路径不启用异步融合线程，保持原有融合加图片编码行为。
+- 新增 H.264 异步融合单元测试，验证融合发生在独立线程、帧和控制消息顺序不变，
+  以及 flush 后旧 epoch 在途结果不会进入新编码器。
+- 实测 1 秒实时 PCM：热态首帧约 1.85 s，较改造前约慢 20 ms；首个 PCM 到
+  `segment_end` 约 2.46 s，较改造前约快 90 ms。连续窗口段内发送耗时降低约 15%。
+- MuseTalk 测试结果：`13 passed`。
 
 ### 2026-11-02
 

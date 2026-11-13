@@ -15,6 +15,7 @@ from muse_stream.api.websocket import LiveStreamSession
 from muse_stream.inference import workers
 from muse_stream.protocol import (
     FRAME_HEADER,
+    FRAME_GENERATED,
     FRAME_SILENT,
     H264_FRAME_HEADER,
     H264_FRAME_MAGIC,
@@ -232,6 +233,265 @@ def test_h264_encoding_preserves_packets_and_keyframe_flags(monkeypatch) -> None
         encoder_thread.join(timeout=10)
         loop_thread.close()
 
+    assert not encoder_thread.is_alive()
+
+
+def test_h264_async_fusion_uses_separate_thread_and_preserves_order(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVATAR_STREAM_FORMAT", "h264")
+    monkeypatch.setenv("AVATAR_H264_GOP", "6")
+    monkeypatch.setenv("AVATAR_STREAM_MAX_WIDTH", "0")
+
+    blend_threads: list[int] = []
+
+    def fake_blend(self, frame_index, frame):
+        blend_threads.append(threading.get_ident())
+        time.sleep(0.005)
+        marker = int(frame[0, 0, 0])
+        return np.full((128, 128, 3), marker, dtype=np.uint8)
+
+    monkeypatch.setattr(
+        workers.InferencePipeline,
+        "blend_frame",
+        fake_blend,
+    )
+
+    loop_thread = EventLoopThread()
+    raw_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    fused_queue = loop_thread.submit(_new_queue(32)).result(timeout=2)
+    network_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    stop = threading.Event()
+    state = AppState(
+        args=Namespace(jpeg_quality=88, fps=24),
+    )
+    state.model.width = 128
+    state.model.height = 128
+    segment = LiveSegment(
+        id=10,
+        source_path=None,
+        wav_path=None,
+        duration=0.5,
+        total_frames=12,
+        global_start_frame=0,
+        speech_frames=12,
+    )
+    fusion_thread = threading.Thread(
+        target=workers.live_fusion_worker,
+        args=(
+            state,
+            raw_queue,
+            fused_queue,
+            loop_thread.loop,
+            stop,
+        ),
+        daemon=True,
+    )
+    encoder_thread = threading.Thread(
+        target=workers.live_encode_worker,
+        args=(
+            state,
+            raw_queue,
+            network_queue,
+            loop_thread.loop,
+            stop,
+            "h264",
+        ),
+        kwargs={
+            "input_queue": fused_queue,
+            "frames_prepared": True,
+        },
+        daemon=True,
+    )
+
+    try:
+        encoder_thread.start()
+        fusion_thread.start()
+        loop_thread.submit(raw_queue.put(("segment", segment))).result(timeout=2)
+        frame_indices = list(range(12))
+        for index in frame_indices:
+            frame = np.full((8, 8, 3), index * 15, dtype=np.uint8)
+            loop_thread.submit(
+                raw_queue.put(
+                    (
+                        "raw",
+                        FRAME_GENERATED,
+                        segment.id,
+                        index * 41667,
+                        index,
+                        frame,
+                    )
+                )
+            ).result(timeout=2)
+        loop_thread.submit(
+            raw_queue.put(("segment_end", segment.id))
+        ).result(timeout=2)
+
+        received = []
+        while True:
+            item = loop_thread.submit(network_queue.get()).result(timeout=10)
+            received.append(item)
+            if item[0] == "segment_end":
+                break
+            if item[0] == "error":
+                pytest.fail(item[1])
+
+        frames = received[1:-1]
+        assert received[0][0] == "segment"
+        assert [item[4] for item in frames] == frame_indices
+        assert len(blend_threads) == len(frame_indices)
+        assert set(blend_threads) == {fusion_thread.ident}
+        assert encoder_thread.ident not in blend_threads
+    finally:
+        stop.set()
+        fusion_thread.join(timeout=5)
+        encoder_thread.join(timeout=10)
+        loop_thread.close()
+
+    assert not fusion_thread.is_alive()
+    assert not encoder_thread.is_alive()
+
+
+def test_async_h264_fusion_drops_canceled_epoch_before_new_idr(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVATAR_STREAM_FORMAT", "h264")
+    monkeypatch.setenv("AVATAR_H264_GOP", "6")
+    monkeypatch.setenv("AVATAR_STREAM_MAX_WIDTH", "0")
+
+    blend_started = threading.Event()
+    release_blend = threading.Event()
+
+    def delayed_blend(self, frame_index, frame):
+        blend_started.set()
+        assert release_blend.wait(timeout=2)
+        marker = int(frame[0, 0, 0])
+        return np.full((128, 128, 3), marker, dtype=np.uint8)
+
+    monkeypatch.setattr(
+        workers.InferencePipeline,
+        "blend_frame",
+        delayed_blend,
+    )
+
+    loop_thread = EventLoopThread()
+    raw_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    fused_queue = loop_thread.submit(_new_queue(32)).result(timeout=2)
+    network_queue = loop_thread.submit(_new_queue(64)).result(timeout=2)
+    stop = threading.Event()
+    state = AppState(
+        args=Namespace(jpeg_quality=88, fps=24),
+    )
+    state.model.width = 128
+    state.model.height = 128
+    old_segment = LiveSegment(
+        id=30,
+        source_path=None,
+        wav_path=None,
+        duration=0.5,
+        total_frames=6,
+        global_start_frame=0,
+        speech_frames=6,
+    )
+    new_segment = LiveSegment(
+        id=31,
+        source_path=None,
+        wav_path=None,
+        duration=0.5,
+        total_frames=6,
+        global_start_frame=0,
+        speech_frames=6,
+    )
+    fusion_thread = threading.Thread(
+        target=workers.live_fusion_worker,
+        args=(
+            state,
+            raw_queue,
+            fused_queue,
+            loop_thread.loop,
+            stop,
+        ),
+        daemon=True,
+    )
+    encoder_thread = threading.Thread(
+        target=workers.live_encode_worker,
+        args=(
+            state,
+            raw_queue,
+            network_queue,
+            loop_thread.loop,
+            stop,
+            "h264",
+        ),
+        kwargs={
+            "input_queue": fused_queue,
+            "frames_prepared": True,
+        },
+        daemon=True,
+    )
+
+    def put(item) -> None:
+        loop_thread.submit(raw_queue.put(item)).result(timeout=2)
+
+    try:
+        encoder_thread.start()
+        fusion_thread.start()
+        put(("segment", old_segment))
+        put(
+            (
+                "raw",
+                FRAME_GENERATED,
+                old_segment.id,
+                0,
+                0,
+                np.full((8, 8, 3), 20, dtype=np.uint8),
+            )
+        )
+        assert blend_started.wait(timeout=2)
+
+        with state.pipeline.lock:
+            state.pipeline.flush_seq = 1
+            state.pipeline.flush_sent_seq = 1
+            state.pipeline.canceled_ids.add(old_segment.id)
+        release_blend.set()
+
+        put(("segment", new_segment))
+        for index in range(6):
+            put(
+                (
+                    "raw",
+                    FRAME_GENERATED,
+                    new_segment.id,
+                    index * 41667,
+                    index,
+                    np.full((8, 8, 3), 80 + index, dtype=np.uint8),
+                )
+            )
+        put(("segment_end", new_segment.id))
+
+        received = []
+        while True:
+            item = loop_thread.submit(network_queue.get()).result(timeout=10)
+            received.append(item)
+            if item[0] == "segment_end":
+                break
+            if item[0] == "error":
+                pytest.fail(item[1])
+
+        frames = [item for item in received if item[0] == "frame"]
+        assert frames
+        assert all(item[2] == new_segment.id for item in frames)
+        assert [item[4] for item in frames] == list(range(6))
+        first_header = H264_FRAME_HEADER.unpack_from(frames[0][5])
+        assert first_header[3] & VIDEO_FLAG_KEYFRAME
+    finally:
+        release_blend.set()
+        stop.set()
+        fusion_thread.join(timeout=5)
+        encoder_thread.join(timeout=10)
+        loop_thread.close()
+
+    assert not fusion_thread.is_alive()
     assert not encoder_thread.is_alive()
 
 

@@ -34,6 +34,23 @@ from .pipeline import InferencePipeline
 FRAME_HOLD = -1
 
 
+def stream_width_limit() -> int:
+    width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
+    return width - width % 2 if width > 0 else 0
+
+
+def resize_for_stream(frame: np.ndarray, stream_width: int) -> np.ndarray:
+    if stream_width > 0 and frame.shape[1] > stream_width:
+        height = round(frame.shape[0] * stream_width / frame.shape[1])
+        height -= height % 2
+        frame = cv2.resize(
+            frame,
+            (stream_width, height),
+            interpolation=cv2.INTER_AREA,
+        )
+    return frame
+
+
 def blend_generated_frames(
     previous,
     current,
@@ -354,6 +371,87 @@ def live_infer_worker(
         )
 
 
+def live_fusion_worker(
+    state: AppState,
+    raw_queue: asyncio.Queue,
+    fused_queue: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    stop: threading.Event,
+) -> None:
+    """Fuse generated faces into source frames ahead of the H.264 encoder."""
+    pipeline = InferencePipeline(state)
+    stream_width = stream_width_limit()
+    count = 0
+    try:
+        while not stop.is_set():
+            item = get_blocking(raw_queue, loop, stop)
+            if item is None:
+                return
+
+            kind = item[0]
+            if kind in ("segment", "segment_end", "error"):
+                if not put_blocking(fused_queue, loop, item, stop):
+                    return
+                if kind == "error":
+                    return
+                continue
+            if kind != "raw":
+                continue
+
+            _, frame_kind, segment_id, pts_us, frame_index, frame = item
+            with state.pipeline.lock:
+                source_flush_seq = state.pipeline.flush_seq
+                canceled = segment_id in state.pipeline.canceled_ids
+            if canceled:
+                continue
+
+            if frame_kind == FRAME_HOLD:
+                prepared = None
+            else:
+                if frame_kind == FRAME_GENERATED:
+                    prepared = pipeline.blend_frame(frame_index, frame)
+                else:
+                    prepared = frame
+                prepared = resize_for_stream(prepared, stream_width)
+
+            with state.pipeline.lock:
+                canceled = (
+                    segment_id in state.pipeline.canceled_ids
+                    or source_flush_seq != state.pipeline.flush_seq
+                )
+            if canceled:
+                continue
+
+            if not put_blocking(
+                fused_queue,
+                loop,
+                (
+                    "raw",
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    prepared,
+                    source_flush_seq,
+                ),
+                stop,
+            ):
+                return
+            count += 1
+            if count % 500 == 0:
+                log(
+                    f"fused {count} live frames "
+                    f"fused_queue={fused_queue.qsize()}"
+                )
+    except Exception:
+        put_blocking(
+            fused_queue,
+            loop,
+            ("error", traceback.format_exc()),
+            stop,
+        )
+
+
 def live_encode_worker(
     state: AppState,
     raw_queue: asyncio.Queue,
@@ -361,17 +459,18 @@ def live_encode_worker(
     loop: asyncio.AbstractEventLoop,
     stop: threading.Event,
     stream_format: str | None = None,
+    input_queue: asyncio.Queue | None = None,
+    frames_prepared: bool = False,
 ) -> None:
     args = state.args
     assert args is not None
+    source_queue = input_queue if input_queue is not None else raw_queue
     pipeline = InferencePipeline(state)
     count = 0
     started = time.monotonic()
     last_encoded: bytes | None = None
     last_composite: np.ndarray | None = None
-    stream_width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
-    if stream_width > 0:
-        stream_width -= stream_width % 2
+    stream_width = stream_width_limit()
     selected_format = (
         stream_format
         or os.environ.get("AVATAR_STREAM_FORMAT", "h264")
@@ -412,17 +511,6 @@ def live_encode_worker(
                 [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality],
             )
         return encoded.tobytes() if ok else None
-
-    def resize_for_stream(frame: np.ndarray) -> np.ndarray:
-        if stream_width > 0 and frame.shape[1] > stream_width:
-            height = round(frame.shape[0] * stream_width / frame.shape[1])
-            height -= height % 2
-            frame = cv2.resize(
-                frame,
-                (stream_width, height),
-                interpolation=cv2.INTER_AREA,
-            )
-        return frame
 
     def put_ordered(
         future: concurrent.futures.Future | None,
@@ -599,7 +687,7 @@ def live_encode_worker(
     sender.start()
     try:
         while not stop.is_set():
-            item = get_blocking(raw_queue, loop, stop)
+            item = get_blocking(source_queue, loop, stop)
             if item is None:
                 return
             with state.pipeline.lock:
@@ -643,7 +731,20 @@ def live_encode_worker(
             if kind != "raw":
                 continue
 
-            _, frame_kind, segment_id, pts_us, frame_index, frame = item
+            (
+                _,
+                frame_kind,
+                segment_id,
+                pts_us,
+                frame_index,
+                frame,
+                *extra,
+            ) = item
+            source_flush_seq = (
+                int(extra[0]) if extra else encoder_flush_seq
+            )
+            if use_h264 and source_flush_seq != encoder_flush_seq:
+                continue
             if frame_kind == FRAME_HOLD:
                 frame_kind = FRAME_SILENT
                 if use_h264:
@@ -651,7 +752,8 @@ def live_encode_worker(
                     if fallback is None:
                         cycle = state.model.avatar.frame_list_cycle
                         fallback = resize_for_stream(
-                            cycle[frame_index % len(cycle)]
+                            cycle[frame_index % len(cycle)],
+                            stream_width,
                         )
                     assert h264_encoder is not None
                     future = h264_encoder.submit(fallback)
@@ -660,7 +762,8 @@ def live_encode_worker(
                     # face onto a newer background frame would misalign it.
                     cycle = state.model.avatar.frame_list_cycle
                     fallback = resize_for_stream(
-                        cycle[frame_index % len(cycle)]
+                        cycle[frame_index % len(cycle)],
+                        stream_width,
                     )
                     future = None
                 metadata = (
@@ -675,11 +778,12 @@ def live_encode_worker(
                 if not put_ordered(future, metadata):
                     return
             else:
-                if frame_kind == FRAME_GENERATED:
+                if frame_kind == FRAME_GENERATED and not frames_prepared:
                     combined = pipeline.blend_frame(frame_index, frame)
                 else:
                     combined = frame
-                combined = resize_for_stream(combined)
+                if not frames_prepared:
+                    combined = resize_for_stream(combined, stream_width)
                 last_composite = combined
                 if use_h264:
                     assert h264_encoder is not None

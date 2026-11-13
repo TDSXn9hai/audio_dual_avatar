@@ -12,7 +12,11 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..audio.segments import InterruptManager
-from ..inference.workers import live_encode_worker, live_infer_worker
+from ..inference.workers import (
+    live_encode_worker,
+    live_fusion_worker,
+    live_infer_worker,
+)
 from ..log import log
 from ..protocol import FRAME_HEADER, frame_pts_us
 from ..state import AppState
@@ -30,8 +34,10 @@ class LiveStreamSession:
         self.args = state.args
         self.network_queue: asyncio.Queue | None = None
         self.raw_queue: asyncio.Queue | None = None
+        self.fused_queue: asyncio.Queue | None = None
         self.stop = threading.Event()
         self.encoder: threading.Thread | None = None
+        self.fusion: threading.Thread | None = None
         self.inference: threading.Thread | None = None
         self.acked_frame = -1
         self.last_sent_frame = -1
@@ -135,6 +141,9 @@ class LiveStreamSession:
         self.raw_queue = asyncio.Queue(
             maxsize=max(16, args.batch_size * 2)
         )
+        use_h264 = self.stream_format in ("h264", "h264_annexb")
+        if use_h264:
+            self.fused_queue = asyncio.Queue(maxsize=8)
         self.encoder = threading.Thread(
             target=live_encode_worker,
             args=(
@@ -145,8 +154,24 @@ class LiveStreamSession:
                 self.stop,
                 self.stream_format,
             ),
+            kwargs={
+                "input_queue": self.fused_queue if use_h264 else None,
+                "frames_prepared": use_h264,
+            },
             daemon=True,
         )
+        if use_h264:
+            self.fusion = threading.Thread(
+                target=live_fusion_worker,
+                args=(
+                    state,
+                    self.raw_queue,
+                    self.fused_queue,
+                    loop,
+                    self.stop,
+                ),
+                daemon=True,
+            )
         self.inference = threading.Thread(
             target=live_infer_worker,
             args=(state, self.raw_queue, loop, self.stop),
@@ -201,6 +226,9 @@ class LiveStreamSession:
             assert self.encoder is not None and self.inference is not None
             assert self.network_queue is not None
             self.encoder.start()
+            if self.fusion is not None:
+                self.fusion.start()
+                log("H.264 async fusion started: threads=1 queue=8")
             self.inference.start()
 
             while True:
@@ -345,7 +373,11 @@ class LiveStreamSession:
                 await ack_task
             except asyncio.CancelledError:
                 pass
-            for frame_queue in (self.raw_queue, self.network_queue):
+            for frame_queue in (
+                self.raw_queue,
+                self.fused_queue,
+                self.network_queue,
+            ):
                 if frame_queue is None:
                     continue
                 try:
@@ -355,6 +387,8 @@ class LiveStreamSession:
                     pass
             if self.inference is not None:
                 self.inference.join(timeout=3)
+            if self.fusion is not None:
+                self.fusion.join(timeout=3)
             if self.encoder is not None:
                 self.encoder.join(timeout=3)
             state.viewer.connected = False
@@ -362,7 +396,11 @@ class LiveStreamSession:
             log("live viewer disconnected")
 
     def _drop_queued_frames(self) -> None:
-        for frame_queue in (self.raw_queue, self.network_queue):
+        for frame_queue in (
+            self.raw_queue,
+            self.fused_queue,
+            self.network_queue,
+        ):
             if frame_queue is None:
                 continue
             try:
