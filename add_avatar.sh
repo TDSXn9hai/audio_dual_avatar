@@ -10,7 +10,10 @@ SHARED_VENV="${AVATAR_VENV:-${ROOT}/.venv}"
 if [[ "${SHARED_VENV}" != /* ]]; then
     SHARED_VENV="${ROOT}/${SHARED_VENV}"
 fi
-MUSETALK_VENV="${MUSETALK_PROJECT}/venv"
+MUSETALK_VENV="${MUSETALK_VENV:-${MUSETALK_PROJECT}/venv}"
+if [[ "${MUSETALK_VENV}" != /* ]]; then
+    MUSETALK_VENV="${ROOT}/${MUSETALK_VENV}"
+fi
 PROJECT_PY="${SHARED_VENV}/bin/python"
 MUSETALK_PY="${MUSETALK_VENV}/bin/python"
 SHARED_ACTIVATE="${SHARED_VENV}/bin/activate"
@@ -181,6 +184,19 @@ MIN_FREE_MB="${ADD_AVATAR_MIN_FREE_MB:-12000}"
 
 cd "${ROOT}"
 
+[[ -f "${SHARED_ACTIVATE}" ]] \
+    || die "missing shared venv activation script: ${SHARED_ACTIVATE}; run ./install.sh first"
+[[ -f "${MUSETALK_ACTIVATE}" ]] \
+    || die "missing MuseTalk venv activation script: ${MUSETALK_ACTIVATE}; run ./install.sh first"
+[[ -x "${PROJECT_PY}" ]] \
+    || die "missing shared Python: ${PROJECT_PY}; run ./install.sh first"
+[[ -x "${MUSETALK_PY}" ]] \
+    || die "missing mmpose-capable Python: ${MUSETALK_PY}; run ./install.sh first"
+"${MUSETALK_PY}" "${ROOT}/scripts/check_musetalk_preprocess.py" \
+    --python "${MUSETALK_PY}" \
+    --muse-dir "${MUSETALK_DIR}" \
+    || die "MuseTalk preprocessing environment is incomplete; run ./install.sh"
+
 if [[ "${RUNTIME_MODE}" -eq 1 ]]; then
     RUNTIME_DATA_ROOT="${AVATAR_RUNTIME_ROOT:-${MINICPM_DIR}/data/avatar_customizations}"
     RUNTIME_DATA_ROOT="$(realpath --canonicalize-missing -- "${RUNTIME_DATA_ROOT}")"
@@ -199,10 +215,6 @@ if [[ "${RUNTIME_MODE}" -eq 1 ]]; then
     fi
 fi
 
-[[ -f "${SHARED_ACTIVATE}" ]] \
-    || die "missing shared venv activation script: ${SHARED_ACTIVATE}; run ./install.sh first"
-[[ -f "${MUSETALK_ACTIVATE}" ]] \
-    || die "missing MuseTalk venv activation script: ${MUSETALK_ACTIVATE}; run ./install.sh first"
 # Activate the shared runtime for this process. The cache-building subshell
 # switches to the separate MuseTalk venv because only that one has mmpose.
 # shellcheck source=/dev/null
@@ -241,10 +253,6 @@ PROMPT_SOURCE="$(resolve_asset "${PROMPT_ARG}" "${PROMPT_DIR}" ".txt")" \
 
 [[ -s "${VOICE_SOURCE}" ]] || die "voice reference is empty: ${VOICE_SOURCE}"
 [[ -s "${PROMPT_SOURCE}" ]] || die "prompt file is empty: ${PROMPT_SOURCE}"
-[[ -x "${MUSETALK_PY}" ]] \
-    || die "missing mmpose-capable Python: ${MUSETALK_PY}; run ./install.sh first"
-[[ -x "${PROJECT_PY}" ]] \
-    || die "missing shared Python: ${PROJECT_PY}; run ./install.sh first"
 ALLOW_MISSING_PRESET=0
 if [[ ! -f "${PRESET_FILE}" ]]; then
     if [[ "${RUNTIME_MODE}" -eq 1 && "${DRY_RUN}" -eq 1 ]]; then
@@ -466,14 +474,14 @@ CREATED_CACHE=1
     source "${MUSETALK_ACTIVATE}"
     cd "${MUSETALK_DIR}"
     CUDA_VISIBLE_DEVICES="${GPU_ID}" \
-    PYTHONPATH=. \
+    PYTHONPATH=.:musetalk/utils \
     PATH="${MINICPM_DIR}/.bin:${PATH}" \
     XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
     HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \
     TORCH_HOME="${MUSETALK_PROJECT}/.cache/torch" \
     MPLCONFIGDIR="${MUSETALK_PROJECT}/.cache/matplotlib" \
     PYTHONUNBUFFERED=1 \
-    python scripts/realtime_inference.py \
+    "${MUSETALK_PY}" scripts/realtime_inference.py \
         --version v15 \
         --gpu_id 0 \
         --unet_config ./models/musetalkV15/musetalk.json \
@@ -483,7 +491,8 @@ CREATED_CACHE=1
         --fps 24 \
         --parsing_mode jaw \
         --left_cheek_width 90 \
-        --right_cheek_width 90
+        --right_cheek_width 90 \
+        9>&-
 ) || die "avatar preprocessing failed; generated files were rolled back"
 
 step "[4/6] Validating the generated cache"

@@ -3,23 +3,26 @@
 #
 #   1. Python 3.10 venv at ./.venv with the pinned package set
 #      (requirements-avatar.lock.txt: torch 2.8.0+cu128, transformers 4.51.0 ...)
-#   2. ffmpeg links, runtime directories, self-signed TLS certificate
-#   3. Model weights: MiniCPM-o 4.5 (~19 GB) and MuseTalk runtime (~4 GB),
+#   2. Separate mmpose/mmcv preprocessing venv for avatar creation
+#   3. ffmpeg links, runtime directories, self-signed TLS certificate
+#   4. Model weights: MiniCPM-o 4.5 (~19 GB) and MuseTalk runtime (~4 GB),
 #      checked against weights.sha256
 #
 # Afterwards start everything with ./start_avatar.sh
 #
-# Usage: ./install.sh [--skip-env] [--skip-weights] [--no-verify] [--hf-mirror]
+# Usage: ./install.sh [--skip-env] [--skip-preprocess-env] [--skip-weights] [--no-verify] [--hf-mirror]
 #
 # Environment overrides:
 #   AVATAR_PYTHON        Python 3.10 executable (default: python3.10, else uv-managed 3.10)
 #   AVATAR_VENV          venv directory (default: ./.venv)
+#   MUSETALK_VENV        MuseTalk preprocessing venv (default: ./musetalk_project/venv)
 #   PIP_INDEX_URL        package index (default: pip config global.index-url, else PyPI)
 #   HF_ENDPOINT          Hugging Face endpoint (default: https://huggingface.co)
 #   HF_TOKEN             optional Hugging Face token
 #   AVATAR_WEIGHTS_FROM  root of an existing installation; weights are hard-linked
 #                        (or copied) from there instead of downloaded
-#   http_proxy / https_proxy are honored by uv, pip and the Hugging Face client.
+#   S3FD_MODEL_URL       mirror for s3fd-619a316812.pth
+#   http_proxy / https_proxy are honored by uv, pip, curl and Hugging Face.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,17 +31,25 @@ LOCK_FILE="${ROOT}/requirements-avatar.lock.txt"
 WEIGHTS_MANIFEST="${ROOT}/weights.sha256"
 MINICPM_DIR="${ROOT}/minicpm_demo"
 MUSETALK_DIR="${ROOT}/musetalk_project/MuseTalk"
+MUSETALK_VENV_DIR="${MUSETALK_VENV:-${ROOT}/musetalk_project/venv}"
+MUSETALK_PY="${MUSETALK_VENV_DIR}/bin/python"
+MUSETALK_PREPROCESS_LOCK="${ROOT}/requirements-musetalk-preprocess.lock.txt"
 AVATAR_CACHE="${MUSETALK_DIR}/results/v15/avatars/musetalk_test_avatar"
+S3FD_REL="musetalk_project/MuseTalk/musetalk/utils/face_detection/detection/sfd/s3fd.pth"
+S3FD_REPO_PATH="n0x1103/s3fd/resolve/main/s3fd-619a316812.pth"
+S3FD_SHA256="619a31681264d3f7f7fc7a16a42cbbe8b23f31a256f75a366e5a1bcd59b33543"
 # Hugging Face revision whose files match weights.sha256.
 MINICPM_REPO="openbmb/MiniCPM-o-4_5"
 MINICPM_REVISION="eb4141de24550a3a1a4082f718be58f46b761728"
 
 DO_ENV=1
+DO_PREPROCESS_ENV=1
 DO_WEIGHTS=1
 DO_VERIFY=1
 for arg in "$@"; do
     case "${arg}" in
         --skip-env) DO_ENV=0 ;;
+        --skip-preprocess-env) DO_PREPROCESS_ENV=0 ;;
         --skip-weights) DO_WEIGHTS=0 ;;
         --no-verify) DO_VERIFY=0 ;;
         --hf-mirror) export HF_ENDPOINT="https://hf-mirror.com" ;;
@@ -54,11 +65,12 @@ cd "${ROOT}"
 step() { echo; echo "==> $*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-step "[1/5] Checking the host"
+step "[1/6] Checking the host"
 for cmd in curl openssl sha256sum; do
     command -v "${cmd}" >/dev/null 2>&1 || die "missing required command: ${cmd}"
 done
 [[ -f "${LOCK_FILE}" ]] || die "missing ${LOCK_FILE}"
+[[ -f "${MUSETALK_PREPROCESS_LOCK}" ]] || die "missing ${MUSETALK_PREPROCESS_LOCK}"
 [[ -f "${WEIGHTS_MANIFEST}" ]] || die "missing ${WEIGHTS_MANIFEST}"
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader || true
@@ -97,7 +109,7 @@ find_python() {
 }
 
 if [[ "${DO_ENV}" -eq 1 ]]; then
-    step "[2/5] Python environment: ${VENV_DIR}"
+    step "[2/6] Python environment: ${VENV_DIR}"
     if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
         BASE_PY="$(find_python)" || die "Python 3.10 not found; install python3.10 or uv, or set AVATAR_PYTHON"
         "${BASE_PY}" -c 'import sys; assert sys.version_info[:2] == (3, 10), sys.version' \
@@ -124,11 +136,60 @@ print(f"torch {torch.__version__} (CUDA {torch.version.cuda}, available={torch.c
       f"transformers {transformers.__version__}, diffusers {diffusers.__version__}, opencv {cv2.__version__}")
 PY
 else
-    step "[2/5] Skipping Python environment (--skip-env)"
+    step "[2/6] Skipping Python environment (--skip-env)"
 fi
 PY="${VENV_DIR}/bin/python"
 [[ -x "${PY}" ]] || die "Python environment is not usable: ${PY}"
-step "[3/5] ffmpeg, runtime directories and TLS certificate"
+
+if [[ "${DO_PREPROCESS_ENV}" -eq 1 ]]; then
+    step "[3/6] MuseTalk preprocessing environment: ${MUSETALK_VENV_DIR}"
+    MUSETALK_PY="${MUSETALK_VENV_DIR}/bin/python"
+    if [[ ! -x "${MUSETALK_PY}" ]]; then
+        BASE_PY="$(find_python)" || die "Python 3.10 not found for the MuseTalk preprocessing environment"
+        "${BASE_PY}" -c 'import sys; assert sys.version_info[:2] == (3, 10), sys.version' \
+            || die "${BASE_PY} is not Python 3.10"
+        if command -v uv >/dev/null 2>&1; then
+            uv venv "${MUSETALK_VENV_DIR}" --python "${BASE_PY}" --seed
+        else
+            "${BASE_PY}" -m venv "${MUSETALK_VENV_DIR}"
+        fi
+    fi
+    MUSETALK_PY="${MUSETALK_VENV_DIR}/bin/python"
+    [[ -x "${MUSETALK_PY}" ]] || die "MuseTalk Python environment is not usable: ${MUSETALK_PY}"
+
+    MUSETALK_BASE_REQUIREMENTS=(
+        "torch==2.1.0"
+        "torchvision==0.16.0"
+        "numpy==1.26.4"
+        "mmengine==0.10.7"
+        "mmcv==2.1.0"
+        "mmdet==3.3.0"
+        "mmpose==1.3.2"
+    )
+    if command -v uv >/dev/null 2>&1; then
+        UV_LINK_MODE="${UV_LINK_MODE:-copy}" uv pip install \
+            --python "${MUSETALK_PY}" "${MUSETALK_BASE_REQUIREMENTS[@]}"
+        UV_LINK_MODE="${UV_LINK_MODE:-copy}" uv pip install \
+            --python "${MUSETALK_PY}" --no-deps -r "${MUSETALK_PREPROCESS_LOCK}"
+    else
+        "${MUSETALK_PY}" -m pip install "${PIP_INDEX_ARGS[@]}" --upgrade pip
+        "${MUSETALK_PY}" -m pip install "${PIP_INDEX_ARGS[@]}" "${MUSETALK_BASE_REQUIREMENTS[@]}"
+        "${MUSETALK_PY}" -m pip install "${PIP_INDEX_ARGS[@]}" --no-deps -r "${MUSETALK_PREPROCESS_LOCK}"
+    fi
+    "${MUSETALK_PY}" -m pip check
+    "${MUSETALK_PY}" - <<'PY'
+import torch, torchvision, numpy, mmcv, mmpose
+print(
+    f"MuseTalk preprocess: torch {torch.__version__}, "
+    f"torchvision {torchvision.__version__}, numpy {numpy.__version__}, "
+    f"mmcv {mmcv.__version__}, mmpose {mmpose.__version__}"
+)
+PY
+else
+    step "[3/6] Skipping MuseTalk preprocessing environment (--skip-preprocess-env)"
+fi
+
+step "[4/6] ffmpeg, runtime directories and TLS certificate"
 if command -v ffmpeg >/dev/null 2>&1 && ffmpeg -version >/dev/null 2>&1; then
     FFMPEG_EXE="$(command -v ffmpeg)"
 else
@@ -178,6 +239,45 @@ hf_download() {  # hf_download REPO LOCAL_DIR [--revision REV] FILE...
     "${VENV_DIR}/bin/huggingface-cli" download "${repo}" ${rev[@]+"${rev[@]}"} \
         --local-dir "${dest}" --include "$@"
 }
+
+file_sha256_matches() {
+    local path="$1"
+    local expected="$2"
+    [[ -s "${path}" ]] || return 1
+    [[ "$(sha256sum "${path}" | awk '{print $1}')" == "${expected}" ]]
+}
+
+ensure_s3fd() {
+    local target="${ROOT}/${S3FD_REL}"
+    local partial="${target}.part"
+    local source_file
+    local url="${S3FD_MODEL_URL:-${HF_ENDPOINT:-https://huggingface.co}/${S3FD_REPO_PATH}}"
+
+    if file_sha256_matches "${target}" "${S3FD_SHA256}"; then
+        echo "Present: ${S3FD_REL}"
+        return 0
+    fi
+    mkdir -p "$(dirname "${target}")"
+    if [[ -n "${AVATAR_WEIGHTS_FROM:-}" ]]; then
+        source_file="${AVATAR_WEIGHTS_FROM}/${S3FD_REL}"
+        [[ -s "${source_file}" ]] \
+            || die "not found in AVATAR_WEIGHTS_FROM: ${S3FD_REL}"
+        file_sha256_matches "${source_file}" "${S3FD_SHA256}" \
+            || die "checksum mismatch in AVATAR_WEIGHTS_FROM: ${S3FD_REL}"
+        ln -f "${source_file}" "${target}" 2>/dev/null \
+            || cp -f "${source_file}" "${target}"
+        echo "Linked: ${S3FD_REL}"
+        return 0
+    fi
+
+    echo "Downloading S3FD face detector from ${url}"
+    curl -L --fail --retry 5 --retry-delay 2 --continue-at - \
+        --output "${partial}" "${url}"
+    file_sha256_matches "${partial}" "${S3FD_SHA256}" \
+        || die "S3FD checksum mismatch; partial file kept at ${partial}"
+    mv -f "${partial}" "${target}"
+    echo "Downloaded: ${S3FD_REL}"
+}
 fetch_group() {  # fetch_group MATCH_REL DEST_REL REPO [REVISION]
     # Missing manifest files under MATCH_REL are fetched from REPO into DEST_REL;
     # their repo paths are the manifest paths relative to DEST_REL.
@@ -205,7 +305,7 @@ fetch_group() {  # fetch_group MATCH_REL DEST_REL REPO [REVISION]
 }
 
 if [[ "${DO_WEIGHTS}" -eq 1 ]]; then
-    step "[4/5] Model weights"
+    step "[5/6] Model weights"
     export HF_HOME="${HF_HOME:-${ROOT}/.cache/huggingface}"
     export HF_HUB_DISABLE_TELEMETRY=1
     MT="musetalk_project/MuseTalk/models"
@@ -215,10 +315,11 @@ if [[ "${DO_WEIGHTS}" -eq 1 ]]; then
     fetch_group "${MT}/sd-vae" "${MT}/sd-vae" "stabilityai/sd-vae-ft-mse"
     fetch_group "${MT}/whisper" "${MT}/whisper" "openai/whisper-tiny"
     fetch_group "${MT}/face-parse-bisent" "${MT}/face-parse-bisent" "ManyOtherFunctions/face-parse-bisent"
+    ensure_s3fd
 else
-    step "[4/5] Skipping weight download (--skip-weights)"
+    step "[5/6] Skipping weight download (--skip-weights)"
 fi
-step "[5/5] Checking weights and avatar cache"
+step "[6/6] Checking weights and avatar cache"
 mapfile -t still_missing < <(missing_under "")
 if [[ ${#still_missing[@]} -gt 0 ]]; then
     printf '  missing: %s\n' "${still_missing[@]}" >&2
@@ -236,6 +337,11 @@ for f in latents.pt coords.pkl mask_coords.pkl avator_info.json; do
     [[ -s "${AVATAR_CACHE}/${f}" ]] || die "avatar cache incomplete: ${AVATAR_CACHE}/${f}"
 done
 echo "Avatar cache OK: ${AVATAR_CACHE#"${ROOT}/"}"
+if [[ "${DO_PREPROCESS_ENV}" -eq 1 ]]; then
+    "${PY}" "${ROOT}/scripts/check_musetalk_preprocess.py" \
+        --python "${MUSETALK_PY}" \
+        --muse-dir "${MUSETALK_DIR}"
+fi
 
 chmod +x "${ROOT}/start_avatar.sh" "${ROOT}/add_avatar.sh" \
     "${MINICPM_DIR}/start_all.sh" "${MINICPM_DIR}/stop_all.sh" 2>/dev/null || true
