@@ -2571,6 +2571,8 @@ def main():
             host=args.host,
             port=port,
             ws_max_size=128 * 1024 * 1024,
+            # Leave time for lifespan cleanup before stop_all.sh's 30s limit.
+            timeout_graceful_shutdown=10,
             **ssl_kwargs,
         )
         internal_config = uvicorn.Config(
@@ -2578,6 +2580,7 @@ def main():
             host=args.host,
             port=args.internal_port,
             log_level="info",
+            timeout_graceful_shutdown=10,
         )
         public_server = uvicorn.Server(public_config)
         internal_server = uvicorn.Server(internal_config)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,9 @@ _REQUIRED_CACHE_FILES = (
 
 
 def cache_dir_for(avatar_id: str, version: str) -> Path:
+    cache_suffix = os.environ.get("MUSETALK_CACHE_SUFFIX", "").strip()
+    if cache_suffix:
+        avatar_id = f"{avatar_id}_{cache_suffix}"
     if version == "v15":
         return ROOT / "results" / "v15" / "avatars" / avatar_id
     return ROOT / "results" / "avatars" / avatar_id
@@ -88,6 +92,8 @@ def build_runtime(args: Namespace) -> Runtime:
         weight_dtype=weight_dtype,
     )
     warmup(runtime, args.batch_size)
+    from .inference.restoration import build_face_restorer
+    runtime.face_restorer = build_face_restorer(runtime.device)
     return runtime
 
 
@@ -95,10 +101,16 @@ def warmup(runtime: Runtime, batch_size: int) -> None:
     """Warm up CUDA kernels so the first streamed batch is not delayed."""
     import torch
 
+    if os.environ.get("MUSETALK_SKIP_WARMUP", "").lower() in ("1", "true", "yes"):
+        log("skipping model warmup (MUSETALK_SKIP_WARMUP enabled)")
+        return
+
     log(f"warming up UNet / VAE / Whisper (batch={batch_size})")
     with torch.no_grad():
+        face_size = int(os.environ.get("MUSETALK_FACE_SIZE", "256"))
+        latent_size = face_size // 8
         latents = torch.zeros(
-            (batch_size, 8, 32, 32),
+            (batch_size, 8, latent_size, latent_size),
             device=runtime.device,
             dtype=runtime.weight_dtype,
         )
@@ -132,6 +144,10 @@ def build_avatar(
     video_path = args.video_path
     bbox_shift = 0 if args.version == "v15" else int(args.bbox_shift)
 
+    cache_avatar_id = avatar_id
+    cache_suffix = os.environ.get("MUSETALK_CACHE_SUFFIX", "").strip()
+    if cache_suffix:
+        cache_avatar_id = f"{avatar_id}_{cache_suffix}"
     cache_dir = cache_dir_for(avatar_id, args.version)
     cache_valid = all(
         (cache_dir / name).exists() for name in _REQUIRED_CACHE_FILES
@@ -165,13 +181,15 @@ def build_avatar(
         raise ValueError("avatar.preparation must be auto/reuse (or true/false)")
 
     log(f"avatar cache: {cache_dir} (preparation={preparation})")
-    return _instantiate_avatar(
+    avatar = _instantiate_avatar(
         args,
-        avatar_id=avatar_id,
+        avatar_id=cache_avatar_id,
         video_path=video_path,
         bbox_shift=bbox_shift,
         preparation=preparation,
     )
+    from .inference.restoration import attach_avatar_restoration
+    return attach_avatar_restoration(avatar, runtime, cache_dir)
 
 
 def load_cached_avatar(
@@ -198,13 +216,15 @@ def load_cached_avatar(
     video_path = str(avatar_info.get("video_path", ""))
     bbox_shift = 0 if args.version == "v15" else int(args.bbox_shift)
     log(f"loading cached avatar: {cache_dir}")
-    return _instantiate_avatar(
+    avatar = _instantiate_avatar(
         args,
         avatar_id=avatar_id,
         video_path=video_path,
         bbox_shift=bbox_shift,
         preparation=False,
     )
+    from .inference.restoration import attach_avatar_restoration
+    return attach_avatar_restoration(avatar, runtime, cache_dir)
 
 
 def _configure_avatar_runtime(args: Namespace, runtime: Runtime) -> None:

@@ -28,6 +28,24 @@ AVATAR_H264_PROFILE=main
 AVATAR_H264_LEVEL=4.0
 AVATAR_H264_CODEC_STRING=avc1.4D4028
 
+# Restore generated faces before compositing/H.264 encoding: off or gpen.
+# GPEN requires models/gpen/GPEN-BFR-512.pth and per-avatar gpen_alignment.npz.
+# Prepare source alignment with deployment/prepare_gpen_alignment.py first.
+MUSETALK_FACE_RESTORATION=off
+# GPEN model runs in a resident child process; "thread" is the local fallback.
+MUSETALK_GPEN_EXECUTION=process
+# Total startup/request deadlines; request timeout includes sending/receiving.
+MUSETALK_GPEN_STARTUP_TIMEOUT_SECONDS=180
+MUSETALK_GPEN_REQUEST_TIMEOUT_SECONDS=30
+# Physical GPU index or UUID. Omit to use MuseTalk's device.
+# Parent and child inherit merged visibility and the same logical CUDA index.
+# Takes precedence over the legacy logical MUSETALK_GPEN_DEVICE override.
+# GPEN_CUDA_VISIBLE_DEVICES=2
+# MUSETALK_GPEN_WEIGHTS=models/gpen/GPEN-BFR-512.pth
+# Default CUDA operators require ninja and a CUDA compiler at first startup.
+# Native operators are available for diagnostics but are slower:
+# MUSETALK_GPEN_OPS=native
+
 # Public single-session Avatar API (/v1/avatar/sessions).
 # Leave the key empty for same-origin/local deployments. When set, REST calls
 # must use Authorization: Bearer <key>; WebSocket access uses the short-lived

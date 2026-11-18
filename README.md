@@ -278,7 +278,7 @@ H.264 流式路径将修复流程拆成异步流水线：
 ```text
 MuseTalk 256 crop
   → 对齐线程
-  → GPEN 推理线程
+  → GPEN 常驻独立进程（每次一个在途请求）
   → 逆变换 / mask 融合 / bbox 贴回线程
   → H.264 编码
 ```
@@ -299,7 +299,31 @@ GPEN_CUDA_VISIBLE_DEVICES=2
 
 当 MuseTalk 和 GPEN 使用不同物理 GPU 时，MuseTalk 进程会看到例如
 `CUDA_VISIBLE_DEVICES=0,2`，因此日志中的 `GPEN GPU: 2 (cuda:1)`表示 GPEN 使用
-物理 GPU2，`cuda:1`是该进程内部的逻辑编号。
+物理 GPU2，`cuda:1`是逻辑编号。父进程与 GPEN 子进程继承相同的 GPU 可见性，
+但 GPEN 模型只在子进程中加载，MuseTalk 继续在父进程运行。
+
+启用 GPEN 后默认使用独立进程，以减少与 MuseTalk、融合和编码线程之间的 Python
+调度竞争。可在 `.avatar-env` 中配置，修改后重启服务：
+
+```bash
+MUSETALK_FACE_RESTORATION=gpen
+MUSETALK_GPEN_EXECUTION=process          # 默认；thread 可回退到同进程推理
+MUSETALK_GPEN_STARTUP_TIMEOUT_SECONDS=180
+MUSETALK_GPEN_REQUEST_TIMEOUT_SECONDS=30
+```
+
+父进程保留对齐、逆变换、mask 融合和贴回。独立进程通过私有本地 socket 接收
+512×512 uint8 人脸并返回修复结果，沿用原有有界队列和帧顺序。原始 crop、逆矩阵和
+取消版本信息留在父进程，过期的在途结果会丢弃。A 图像路径和 v2 cache 均保持兼容，
+不需要因进程拆分重建 cache。WebP/JPEG 兼容路径也会调用同一个 GPEN 子进程。
+
+`/api/status` 的 `face_restoration` 提供 `execution`、`pid`、`alive`、`error`；
+`mean_ms`/`last_ms` 表示子进程内处理时间（含转换、GPU 推理、同步回传），
+`rpc_mean_ms`/`rpc_last_ms` 表示父进程请求往返时间；`ipc_mean_ms`/`ipc_last_ms`
+是两者之差，包含传输及调度等待，不能仅视为复制成本。`last_finalize_ms` 单独记录
+CPU 逆变换及 support 融合，不再覆盖模型计时。进程故障会显式上报并使状态变为
+`restoration_error`，需要重启 MuseTalk 恢复，不会静默返回未修复图像。请求超时覆盖
+收发全过程。正常关闭服务会回收 GPEN 子进程；父进程被强杀时，子进程也会检测并退出。
 
 GPEN 对齐文件保存在每个形象 cache 目录的 `gpen_alignment.npz` 中。当前格式为
 v2，除了 256→512 的正向矩阵，还保存了预先计算好的 512→256 逆矩阵，服务运行时

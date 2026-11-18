@@ -25,6 +25,8 @@ fi
 # CUDA_VISIBLE_DEVICES preserves the original single-GPU deployment.
 MINICPM_CUDA_VISIBLE_DEVICES="${MINICPM_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
 MUSETALK_CUDA_VISIBLE_DEVICES="${MUSETALK_CUDA_VISIBLE_DEVICES:-${MINICPM_CUDA_VISIBLE_DEVICES}}"
+source "${ROOT}/scripts/gpen_gpu.sh"
+configure_gpen_gpu "${MUSETALK_CUDA_VISIBLE_DEVICES}" "${GPEN_CUDA_VISIBLE_DEVICES:-}" "${MUSETALK_GPEN_DEVICE:-}"
 export CUDA_VISIBLE_DEVICES="${MINICPM_CUDA_VISIBLE_DEVICES}"
 export AVATAR_STREAM_FORMAT="${AVATAR_STREAM_FORMAT:-h264}"
 export AVATAR_STREAM_MAX_WIDTH="${AVATAR_STREAM_MAX_WIDTH:-0}"
@@ -36,6 +38,20 @@ export AVATAR_H264_PRESET="${AVATAR_H264_PRESET:-ultrafast}"
 export AVATAR_H264_PROFILE="${AVATAR_H264_PROFILE:-main}"
 export AVATAR_H264_LEVEL="${AVATAR_H264_LEVEL:-4.0}"
 export AVATAR_H264_CODEC_STRING="${AVATAR_H264_CODEC_STRING:-avc1.4D4028}"
+export MUSETALK_FACE_RESTORATION="${MUSETALK_FACE_RESTORATION:-off}"
+export MUSETALK_GPEN_EXECUTION="${MUSETALK_GPEN_EXECUTION:-process}"
+export MUSETALK_GPEN_STARTUP_TIMEOUT_SECONDS="${MUSETALK_GPEN_STARTUP_TIMEOUT_SECONDS:-180}"
+export MUSETALK_GPEN_REQUEST_TIMEOUT_SECONDS="${MUSETALK_GPEN_REQUEST_TIMEOUT_SECONDS:-30}"
+# Parent and GPEN child inherit the same visibility and logical device mapping.
+if [[ -n "${MUSETALK_GPEN_DEVICE:-}" ]]; then
+    export MUSETALK_GPEN_DEVICE
+fi
+if [[ -n "${MUSETALK_GPEN_WEIGHTS:-}" ]]; then
+    export MUSETALK_GPEN_WEIGHTS
+fi
+if [[ -n "${MUSETALK_GPEN_OPS:-}" ]]; then
+    export MUSETALK_GPEN_OPS
+fi
 
 VENV_DIR="${AVATAR_VENV:-${ROOT}/.venv}"
 PYTHON="${VENV_DIR}/bin/python"
@@ -328,7 +344,7 @@ start_musetalk() {
     rm -f "${MUSETALK_PID}"
     # Same environment as musetalk_project/activate.sh, but with the shared venv.
     setsid -f env \
-        CUDA_VISIBLE_DEVICES="${MUSETALK_CUDA_VISIBLE_DEVICES}" \
+        CUDA_VISIBLE_DEVICES="${MUSETALK_PROCESS_GPUS}" \
         VIRTUAL_ENV="${VENV_DIR}" \
         PATH="${VENV_DIR}/bin:${MUSETALK_DIR}/ffmpeg-4.4-amd64-static:${PATH}" \
         XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
@@ -478,6 +494,8 @@ case "${1:-start}" in
         echo "  MiniCPM-o logs:            ${MINICPM_DIR}/.run-logs"
         echo "  MiniCPM GPU:               ${MINICPM_CUDA_VISIBLE_DEVICES}"
         echo "  MuseTalk GPU:              ${MUSETALK_CUDA_VISIBLE_DEVICES}"
+        echo "  GPEN GPU:                  ${GPEN_CUDA_VISIBLE_DEVICES:-same as MuseTalk} (${MUSETALK_GPEN_DEVICE:-default})"
+        echo "  GPEN execution:            ${MUSETALK_GPEN_EXECUTION}"
         echo "  Avatar frame format:       ${AVATAR_STREAM_FORMAT}"
         echo "  Stop:                      $0 stop"
         ;;

@@ -184,6 +184,13 @@ MIN_FREE_MB="${ADD_AVATAR_MIN_FREE_MB:-12000}"
 
 cd "${ROOT}"
 
+if [[ -f "${ROOT}/.avatar-env" ]]; then
+    # Keep avatar creation aligned with the runtime restoration mode.
+    # shellcheck source=/dev/null
+    source "${ROOT}/.avatar-env"
+fi
+FACE_RESTORATION_MODE="${MUSETALK_FACE_RESTORATION:-off}"
+
 [[ -f "${SHARED_ACTIVATE}" ]] \
     || die "missing shared venv activation script: ${SHARED_ACTIVATE}; run ./install.sh first"
 [[ -f "${MUSETALK_ACTIVATE}" ]] \
@@ -495,7 +502,28 @@ CREATED_CACHE=1
         9>&-
 ) || die "avatar preprocessing failed; generated files were rolled back"
 
-step "[4/6] Validating the generated cache"
+if [[ "${FACE_RESTORATION_MODE}" == "gpen" ]]; then
+    step "[4/7] Generating the GPEN v2 alignment cache"
+    GPEN_ALIGNMENT_PYTHON="${GPEN_ALIGNMENT_PYTHON:-/tmp/avatar-gfpgan-venv/bin/python}"
+    [[ -x "${GPEN_ALIGNMENT_PYTHON}" ]] \
+        || die "missing GPEN alignment Python: ${GPEN_ALIGNMENT_PYTHON}"
+    GPEN_SITE_PACKAGES="${SHARED_VENV}/lib/python3.10/site-packages"
+    CUDA_VISIBLE_DEVICES="${GPU_ID}" \
+    PYTHONPATH="${GPEN_SITE_PACKAGES}" \
+    XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
+    HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \
+    TORCH_HOME="${MUSETALK_PROJECT}/.cache/torch" \
+    PYTHONUNBUFFERED=1 \
+    "${GPEN_ALIGNMENT_PYTHON}" \
+        "${ROOT}/deployment/prepare_gpen_alignment.py" \
+        --avatars "${AVATAR_ID}" \
+        --device cuda:0 \
+        || die "GPEN alignment cache generation failed; generated files were rolled back"
+else
+    echo "GPEN restoration disabled; skipping GPEN alignment cache"
+fi
+
+step "[5/7] Validating the generated cache"
 "${PROJECT_PY}" - "${MUSETALK_DIR}" "${AVATAR_ID}" <<'PY'
 import sys
 from pathlib import Path
@@ -515,7 +543,7 @@ print(
 )
 PY
 
-step "[5/6] Installing voice, prompt and preset metadata"
+step "[6/7] Installing voice, prompt and preset metadata"
 mkdir -p "${VOICE_DIR}" "${PROMPT_DIR}"
 if [[ "${CREATE_VOICE}" -eq 1 ]]; then
     cp -- "${VOICE_SOURCE}" "${VOICE_DEST}"
@@ -701,7 +729,7 @@ print(f"Preset OK: {preset_id} -> avatar={avatar_id}, order={next_order}")
 PY
 
 SUCCESS=1
-step "[6/6] Avatar added"
+step "[7/7] Avatar added"
 echo "Avatar cache: ${CACHE_DIR}"
 echo "Preset:       ${PRESET_ID}"
 echo "Voice:        ${VOICE_REL}"

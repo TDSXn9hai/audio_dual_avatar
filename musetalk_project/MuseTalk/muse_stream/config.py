@@ -82,7 +82,9 @@ def load_config(config_name: str) -> LoadedConfig:
         raise ValueError("models.version must be 'v1' or 'v15'")
 
     fps = int(server_cfg.get("fps", 24))
-    batch_size = int(server_cfg.get("batch_size", 20))
+    batch_size = int(
+        os.environ.get("MUSETALK_BATCH_SIZE", server_cfg.get("batch_size", 20))
+    )
     prebuffer = int(server_cfg.get("prebuffer", 8))
     queue_size = int(server_cfg.get("queue_size", 96))
     idle_timeout_seconds = float(live_cfg.get("idle_timeout_seconds", 30))

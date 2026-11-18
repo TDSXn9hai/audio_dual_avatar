@@ -16,6 +16,8 @@ from ..inference.workers import (
     live_encode_worker,
     live_fusion_worker,
     live_infer_worker,
+    live_prepare_worker,
+    live_gpen_worker,
 )
 from ..log import log
 from ..protocol import FRAME_HEADER, frame_pts_us
@@ -34,10 +36,14 @@ class LiveStreamSession:
         self.args = state.args
         self.network_queue: asyncio.Queue | None = None
         self.raw_queue: asyncio.Queue | None = None
+        self.restored_queue: asyncio.Queue | None = None
+        self.prepared_queue: asyncio.Queue | None = None
         self.fused_queue: asyncio.Queue | None = None
         self.stop = threading.Event()
         self.encoder: threading.Thread | None = None
         self.fusion: threading.Thread | None = None
+        self.restoration: threading.Thread | None = None
+        self.gpen: threading.Thread | None = None
         self.inference: threading.Thread | None = None
         self.acked_frame = -1
         self.last_sent_frame = -1
@@ -143,6 +149,8 @@ class LiveStreamSession:
         )
         use_h264 = self.stream_format in ("h264", "h264_annexb")
         if use_h264:
+            self.prepared_queue = asyncio.Queue(maxsize=2)
+            self.restored_queue = asyncio.Queue(maxsize=2)
             self.fused_queue = asyncio.Queue(maxsize=8)
         self.encoder = threading.Thread(
             target=live_encode_worker,
@@ -161,15 +169,28 @@ class LiveStreamSession:
             daemon=True,
         )
         if use_h264:
+            self.restoration = threading.Thread(
+                target=live_prepare_worker,
+                args=(
+                    state, self.raw_queue, self.prepared_queue, loop, self.stop,
+                ),
+                daemon=True,
+            )
+            self.gpen = threading.Thread(
+                target=live_gpen_worker,
+                args=(state, self.prepared_queue, self.restored_queue, loop, self.stop),
+                daemon=True,
+            )
             self.fusion = threading.Thread(
                 target=live_fusion_worker,
                 args=(
                     state,
-                    self.raw_queue,
+                    self.restored_queue,
                     self.fused_queue,
                     loop,
                     self.stop,
                 ),
+                kwargs={"frames_restored": True},
                 daemon=True,
             )
         self.inference = threading.Thread(
@@ -228,7 +249,11 @@ class LiveStreamSession:
             self.encoder.start()
             if self.fusion is not None:
                 self.fusion.start()
-                log("H.264 async fusion started: threads=1 queue=8")
+                assert self.restoration is not None
+                self.restoration.start()
+                assert self.gpen is not None
+                self.gpen.start()
+                log("H.264 async alignment/GPEN/composite started: queues=2/2/8")
             self.inference.start()
 
             while True:
@@ -375,6 +400,8 @@ class LiveStreamSession:
                 pass
             for frame_queue in (
                 self.raw_queue,
+                self.prepared_queue,
+                self.restored_queue,
                 self.fused_queue,
                 self.network_queue,
             ):
@@ -389,6 +416,10 @@ class LiveStreamSession:
                 self.inference.join(timeout=3)
             if self.fusion is not None:
                 self.fusion.join(timeout=3)
+            if self.restoration is not None:
+                self.restoration.join(timeout=3)
+            if self.gpen is not None:
+                self.gpen.join(timeout=3)
             if self.encoder is not None:
                 self.encoder.join(timeout=3)
             state.viewer.connected = False
@@ -398,6 +429,8 @@ class LiveStreamSession:
     def _drop_queued_frames(self) -> None:
         for frame_queue in (
             self.raw_queue,
+            self.prepared_queue,
+            self.restored_queue,
             self.fused_queue,
             self.network_queue,
         ):

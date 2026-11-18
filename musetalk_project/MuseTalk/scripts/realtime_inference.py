@@ -193,7 +193,11 @@ class Avatar:
                 y2 = min(y2, frame.shape[0])
                 coord_list[idx] = [x1, y1, x2, y2]  # 更新coord_list中的bbox
             crop_frame = frame[y1:y2, x1:x2]
-            resized_crop_frame = cv2.resize(crop_frame, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+            face_size = int(os.environ.get("MUSETALK_FACE_SIZE", "256"))
+            resized_crop_frame = cv2.resize(
+                crop_frame, (face_size, face_size),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
             latents = vae.get_latents_for_unet(resized_crop_frame)
             input_latent_list.append(latents)
 

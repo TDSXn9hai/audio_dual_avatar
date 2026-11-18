@@ -34,6 +34,10 @@ from .pipeline import InferencePipeline
 FRAME_HOLD = -1
 
 
+def direct_bbox_restoration() -> bool:
+    return os.environ.get("MUSETALK_GPEN_OUTPUT_MODE", "crop").strip().lower() == "bbox"
+
+
 def stream_width_limit() -> int:
     width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
     return width - width % 2 if width > 0 else 0
@@ -135,6 +139,9 @@ def live_infer_worker(
 
     def emit_idle_frame() -> bool:
         nonlocal next_frame
+        with state.pipeline.lock:
+            source_epoch = state.pipeline.flush_seq
+            source_revision = state.model.avatar_revision
         frame = avatar.frame_list_cycle[
             next_frame % len(avatar.frame_list_cycle)
         ]
@@ -148,6 +155,8 @@ def live_infer_worker(
                 frame_pts_us(next_frame, state.model.fps),
                 next_frame,
                 frame,
+                source_epoch,
+                source_revision,
             ),
             stop,
         ):
@@ -165,6 +174,9 @@ def live_infer_worker(
             and last_media.id not in state.pipeline.canceled_ids
             and hold_run < args.hold_max_frames
         ):
+            with state.pipeline.lock:
+                source_epoch = state.pipeline.flush_seq
+                source_revision = state.model.avatar_revision
             if not put_blocking(
                 raw_queue,
                 loop,
@@ -175,6 +187,8 @@ def live_infer_worker(
                     frame_pts_us(next_frame, state.model.fps),
                     next_frame,
                     None,
+                    source_epoch,
+                    source_revision,
                 ),
                 stop,
             ):
@@ -267,6 +281,8 @@ def live_infer_worker(
             canceled = False
             with state.pipeline.lock:
                 state.pipeline.generating += 1
+                segment_epoch = state.pipeline.flush_seq
+                segment_revision = state.model.avatar_revision
             try:
                 if not put_blocking(
                     raw_queue, loop, ("segment", segment), stop
@@ -337,6 +353,8 @@ def live_infer_worker(
                             frame_pts_us(frame_index, state.model.fps),
                             frame_index,
                             emit_frame,
+                            segment_epoch,
+                            segment_revision,
                         ),
                         stop,
                     ):
@@ -363,6 +381,7 @@ def live_infer_worker(
                 if not completed and not canceled:
                     segments.enqueue(segment)
     except Exception:
+        log(traceback.format_exc())
         put_blocking(
             raw_queue,
             loop,
@@ -371,17 +390,178 @@ def live_infer_worker(
         )
 
 
+def live_prepare_worker(
+    state: AppState,
+    raw_queue: asyncio.Queue,
+    restored_queue: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    stop: threading.Event,
+) -> None:
+    """Prepare aligned GPEN inputs without running GPEN."""
+    pipeline = InferencePipeline(state)
+    count = 0
+    try:
+        while not stop.is_set():
+            item = get_blocking(raw_queue, loop, stop)
+            if item is None:
+                return
+            kind = item[0]
+            if kind in ("segment", "segment_end", "error"):
+                if kind == "segment_end" and count:
+                    log(
+                        f"alignment stage: frames={count} "
+                        f"raw_queue={raw_queue.qsize()} "
+                        f"restored_queue={restored_queue.qsize()}"
+                    )
+                if not put_blocking(restored_queue, loop, item, stop):
+                    return
+                if kind == "error":
+                    return
+                continue
+            if kind != "raw":
+                continue
+            _, frame_kind, segment_id, pts_us, frame_index, frame, *extra = item
+            with state.pipeline.lock:
+                epoch = int(extra[0]) if extra else state.pipeline.flush_seq
+                revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+                stale = (
+                    segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision
+                )
+            if stale:
+                continue
+            if frame_kind == FRAME_GENERATED:
+                pipeline._dump_generated_raw(frame_index, frame)
+                frame, original, inverse = pipeline.prepare_restoration(
+                    frame_index, frame)
+                count += 1
+            else:
+                original, inverse = None, None
+            with state.pipeline.lock:
+                stale = (
+                    segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision
+                )
+            if stale:
+                continue
+            if not put_blocking(
+                restored_queue, loop,
+                ("raw", frame_kind, segment_id, pts_us, frame_index,
+                 frame, epoch, revision, original, inverse), stop,
+            ):
+                return
+    except Exception:
+        log(traceback.format_exc())
+        put_blocking(
+            restored_queue, loop, ("error", traceback.format_exc()), stop,
+        )
+
+
+def live_gpen_worker(
+    state: AppState,
+    prepared_queue: asyncio.Queue,
+    restored_queue: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    stop: threading.Event,
+) -> None:
+    """Run GPEN only on already aligned faces."""
+    pipeline = InferencePipeline(state)
+    try:
+        while not stop.is_set():
+            item = get_blocking(prepared_queue, loop, stop)
+            if item is None:
+                return
+            if item[0] in ("segment", "segment_end", "error"):
+                if not put_blocking(restored_queue, loop, item, stop):
+                    return
+                if item[0] == "error":
+                    return
+                continue
+            if item[0] != "raw":
+                continue
+            _, kind, segment_id, pts_us, frame_index, frame, epoch, revision, original, inverse = item
+            with state.pipeline.lock:
+                if (segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision):
+                    continue
+            if kind == FRAME_GENERATED:
+                frame = pipeline.infer_restoration(frame)
+            with state.pipeline.lock:
+                if (segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision):
+                    continue
+            if not put_blocking(
+                restored_queue, loop,
+                ("raw", kind, segment_id, pts_us, frame_index, frame,
+                 epoch, revision, original, inverse), stop):
+                return
+    except Exception:
+        log(traceback.format_exc())
+        put_blocking(restored_queue, loop, ("error", traceback.format_exc()), stop)
+
+
+def live_restoration_worker(
+    state, raw_queue, restored_queue, loop, stop
+) -> None:
+    """Backward-compatible single-stage worker used by older integrations."""
+    pipeline = InferencePipeline(state)
+    try:
+        while not stop.is_set():
+            item = get_blocking(raw_queue, loop, stop)
+            if item is None:
+                return
+            if item[0] in ("segment", "segment_end", "error"):
+                if not put_blocking(restored_queue, loop, item, stop):
+                    return
+                if item[0] == "error":
+                    return
+                continue
+            if item[0] != "raw":
+                continue
+            _, kind, segment_id, pts_us, index, frame, *extra = item
+            epoch = int(extra[0]) if extra else state.pipeline.flush_seq
+            revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+            with state.pipeline.lock:
+                if (segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision):
+                    continue
+            if kind == FRAME_GENERATED:
+                frame = pipeline.restore_frame(index, frame)
+            with state.pipeline.lock:
+                if (segment_id in state.pipeline.canceled_ids
+                    or epoch != state.pipeline.flush_seq
+                    or revision != state.model.avatar_revision):
+                    continue
+            if not put_blocking(
+                restored_queue, loop,
+                ("raw", kind, segment_id, pts_us, index, frame, epoch, revision),
+                stop,
+            ):
+                return
+    except Exception:
+        put_blocking(restored_queue, loop, ("error", traceback.format_exc()), stop)
+
+
 def live_fusion_worker(
     state: AppState,
     raw_queue: asyncio.Queue,
     fused_queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
     stop: threading.Event,
+    frames_restored: bool = False,
 ) -> None:
     """Fuse generated faces into source frames ahead of the H.264 encoder."""
     pipeline = InferencePipeline(state)
     stream_width = stream_width_limit()
     count = 0
+    generated_count = 0
+    total_ms = 0.0
+    direct_bbox = direct_bbox_restoration()
     try:
         while not stop.is_set():
             item = get_blocking(raw_queue, loop, stop)
@@ -390,6 +570,13 @@ def live_fusion_worker(
 
             kind = item[0]
             if kind in ("segment", "segment_end", "error"):
+                if kind == "segment_end" and generated_count:
+                    log(
+                        f"composite stage: frames={generated_count} "
+                        f"mean={total_ms / generated_count:.2f}ms "
+                        f"input_queue={raw_queue.qsize()} "
+                        f"fused_queue={fused_queue.qsize()}"
+                    )
                 if not put_blocking(fused_queue, loop, item, stop):
                     return
                 if kind == "error":
@@ -398,10 +585,21 @@ def live_fusion_worker(
             if kind != "raw":
                 continue
 
-            _, frame_kind, segment_id, pts_us, frame_index, frame = item
+            _, frame_kind, segment_id, pts_us, frame_index, frame, *extra = item
+            original = inverse = None
+            if frames_restored and len(extra) >= 4:
+                source_flush_seq, source_revision, original, inverse = extra[:4]
+            else:
+                source_flush_seq = int(extra[0]) if extra else state.pipeline.flush_seq
+                source_revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
             with state.pipeline.lock:
-                source_flush_seq = state.pipeline.flush_seq
-                canceled = segment_id in state.pipeline.canceled_ids
+                source_flush_seq = int(extra[0]) if extra else state.pipeline.flush_seq
+                source_revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+                canceled = (
+                    segment_id in state.pipeline.canceled_ids
+                    or source_flush_seq != state.pipeline.flush_seq
+                    or source_revision != state.model.avatar_revision
+                )
             if canceled:
                 continue
 
@@ -409,7 +607,25 @@ def live_fusion_worker(
                 prepared = None
             else:
                 if frame_kind == FRAME_GENERATED:
-                    prepared = pipeline.blend_frame(frame_index, frame)
+                    started = time.perf_counter()
+                    if frames_restored:
+                        if original is not None:
+                            if direct_bbox:
+                                restored_crop = pipeline.finalize_restoration_to_bbox(
+                                    frame_index, frame, original, inverse)
+                                prepared = pipeline.composite_frame(
+                                    frame_index, restored_crop, already_bbox=True)
+                            else:
+                                restored_crop = pipeline.finalize_restoration(
+                                    frame, original, inverse)
+                                prepared = pipeline.composite_frame(
+                                    frame_index, restored_crop)
+                        else:
+                            prepared = pipeline.composite_frame(frame_index, frame)
+                    else:
+                        prepared = pipeline.blend_frame(frame_index, frame)
+                    total_ms += (time.perf_counter() - started) * 1000
+                    generated_count += 1
                 else:
                     prepared = frame
                 prepared = resize_for_stream(prepared, stream_width)
@@ -418,6 +634,7 @@ def live_fusion_worker(
                 canceled = (
                     segment_id in state.pipeline.canceled_ids
                     or source_flush_seq != state.pipeline.flush_seq
+                    or source_revision != state.model.avatar_revision
                 )
             if canceled:
                 continue
@@ -433,6 +650,7 @@ def live_fusion_worker(
                     frame_index,
                     prepared,
                     source_flush_seq,
+                    source_revision,
                 ),
                 stop,
             ):
@@ -444,6 +662,7 @@ def live_fusion_worker(
                     f"fused_queue={fused_queue.qsize()}"
                 )
     except Exception:
+        log(traceback.format_exc())
         put_blocking(
             fused_queue,
             loop,
@@ -743,7 +962,12 @@ def live_encode_worker(
             source_flush_seq = (
                 int(extra[0]) if extra else encoder_flush_seq
             )
+            source_revision = (
+                int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+            )
             if use_h264 and source_flush_seq != encoder_flush_seq:
+                continue
+            if source_revision != state.model.avatar_revision:
                 continue
             if frame_kind == FRAME_HOLD:
                 frame_kind = FRAME_SILENT
@@ -782,6 +1006,14 @@ def live_encode_worker(
                     combined = pipeline.blend_frame(frame_index, frame)
                 else:
                     combined = frame
+                with state.pipeline.lock:
+                    stale = (
+                        segment_id in state.pipeline.canceled_ids
+                        or source_flush_seq != state.pipeline.flush_seq
+                        or source_revision != state.model.avatar_revision
+                    )
+                if stale:
+                    continue
                 if not frames_prepared:
                     combined = resize_for_stream(combined, stream_width)
                 last_composite = combined
@@ -805,6 +1037,7 @@ def live_encode_worker(
                     return
     except Exception:
         sender_gone.set()
+        log(traceback.format_exc())
         put_blocking(
             network_queue,
             loop,

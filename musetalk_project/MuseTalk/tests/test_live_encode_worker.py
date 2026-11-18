@@ -39,12 +39,60 @@ class EventLoopThread:
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop)
 
     def close(self) -> None:
+        async def drain():
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        self.submit(drain()).result(timeout=2)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=2)
 
 
 async def _new_queue(maxsize: int) -> asyncio.Queue:
     return asyncio.Queue(maxsize=maxsize)
+
+
+@pytest.mark.parametrize("change", ["queued_epoch", "queued_avatar", "inflight_avatar"])
+@pytest.mark.parametrize("frames_restored", [False, True])
+def test_fusion_rejects_stale_restoration_work(monkeypatch, change, frames_restored):
+    state = AppState(args=Namespace())
+    state.pipeline.flush_seq = 1
+    state.model.avatar_revision = 1
+    calls = []
+
+    def blend(self, index, frame):
+        calls.append(index)
+        if change == "inflight_avatar":
+            state.model.avatar_revision += 1
+        return frame
+
+    monkeypatch.setattr(workers.InferencePipeline, "composite_frame" if frames_restored else "blend_frame", blend)
+    loop_thread = EventLoopThread()
+    raw = loop_thread.submit(_new_queue(8)).result(timeout=2)
+    fused = loop_thread.submit(_new_queue(8)).result(timeout=2)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=workers.live_fusion_worker,
+        args=(state, raw, fused, loop_thread.loop, stop),
+        kwargs={"frames_restored": frames_restored}, daemon=True)
+    try:
+        thread.start()
+        epoch = 0 if change == "queued_epoch" else 1
+        revision = 0 if change == "queued_avatar" else 1
+        loop_thread.submit(raw.put((
+            "raw", FRAME_GENERATED, 99, 123456, 3,
+            np.zeros((8, 8, 3), np.uint8), epoch, revision,
+        ))).result(timeout=2)
+        loop_thread.submit(raw.put(("segment_end", 99))).result(timeout=2)
+        item = loop_thread.submit(fused.get()).result(timeout=3)
+        assert item == ("segment_end", 99)
+        assert calls == ([3] if change == "inflight_avatar" else [])
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+        loop_thread.close()
+    assert not thread.is_alive()
 
 
 def test_parallel_encoding_preserves_frame_and_control_order(monkeypatch) -> None:
@@ -638,3 +686,175 @@ def test_live_session_selects_codec_from_viewer_query() -> None:
         SimpleNamespace(query_params={"video_codec": "h264"}),
     )
     assert session.stream_format == "h264"
+
+
+def test_restoration_and_composite_overlap_and_preserve_fifo(monkeypatch):
+    state = AppState(args=Namespace())
+    entered_composite = threading.Event()
+    next_restore = threading.Event()
+    def restore(self, index, frame):
+        if index == 2:
+            assert entered_composite.wait(2)
+            next_restore.set()
+        return frame + 1
+    def composite(self, index, frame):
+        if index == 1:
+            entered_composite.set()
+            assert next_restore.wait(2), 'next restoration must overlap this composite'
+        return frame + 2
+    monkeypatch.setattr(workers.InferencePipeline, 'restore_frame', restore)
+    monkeypatch.setattr(workers.InferencePipeline, 'composite_frame', composite)
+    loop = EventLoopThread()
+    raw = loop.submit(_new_queue(8)).result(2)
+    restored = loop.submit(_new_queue(2)).result(2)
+    fused = loop.submit(_new_queue(8)).result(2)
+    stop = threading.Event()
+    threads = [threading.Thread(target=workers.live_restoration_worker,args=(state,raw,restored,loop.loop,stop)),
+               threading.Thread(target=workers.live_fusion_worker,args=(state,restored,fused,loop.loop,stop),kwargs={'frames_restored':True})]
+    items=[('segment',123),('raw',FRAME_GENERATED,123,100,1,np.zeros((8,8,3),np.uint8),0,0),
+           ('raw',FRAME_GENERATED,123,200,2,np.zeros((8,8,3),np.uint8),0,0),
+           ('raw',FRAME_SILENT,123,300,3,np.full((8,8,3),10,np.uint8),0,0),
+           ('raw',workers.FRAME_HOLD,123,400,4,None,0,0),('segment_end',123)]
+    try:
+        for t in threads:t.start()
+        for item in items:loop.submit(raw.put(item)).result(2)
+        received=[loop.submit(fused.get()).result(5) for _ in items]
+        assert received[0] == items[0] and received[-1] == items[-1]
+        for item, before in zip(received[1:-1],items[1:-1]):
+            assert item[:5] == before[:5] and item[6:] == before[6:]
+        assert np.all(received[1][5] == 3) and np.all(received[2][5] == 3)
+        assert np.all(received[3][5] == 10) and received[4][5] is None
+        assert next_restore.is_set()
+    finally:
+        stop.set()
+        for t in threads:t.join(3)
+        loop.close()
+    assert not any(t.is_alive() for t in threads)
+
+
+@pytest.mark.parametrize('change',['queued_epoch','queued_avatar','canceled','inflight_epoch','inflight_avatar'])
+def test_restoration_rejects_stale_work(monkeypatch,change):
+    state=AppState(args=Namespace())
+    state.pipeline.flush_seq=1
+    state.model.avatar_revision=1
+    calls=[]
+    def restore(self,index,frame):
+        calls.append(index)
+        if change=='inflight_epoch':state.pipeline.flush_seq+=1
+        if change=='inflight_avatar':state.model.avatar_revision+=1
+        return frame
+    monkeypatch.setattr(workers.InferencePipeline,'restore_frame',restore)
+    loop=EventLoopThread()
+    raw=loop.submit(_new_queue(8)).result(2)
+    restored=loop.submit(_new_queue(8)).result(2)
+    stop=threading.Event()
+    thread=threading.Thread(target=workers.live_restoration_worker,args=(state,raw,restored,loop.loop,stop))
+    if change=='canceled':state.pipeline.canceled_ids.add(99)
+    try:
+        thread.start()
+        epoch=0 if change=='queued_epoch' else 1
+        revision=0 if change=='queued_avatar' else 1
+        loop.submit(raw.put(('raw',FRAME_GENERATED,99,123,3,np.zeros((8,8,3),np.uint8),epoch,revision))).result(2)
+        loop.submit(raw.put(('segment_end',99))).result(2)
+        assert loop.submit(restored.get()).result(3)==('segment_end',99)
+        assert calls==([3] if change.startswith('inflight') else [])
+    finally:
+        stop.set();thread.join(3);loop.close()
+    assert not thread.is_alive()
+
+
+def test_restoration_failure_is_forwarded_as_error(monkeypatch):
+    def fail(self,index,frame):
+        raise RuntimeError('restoration failed explicitly')
+    monkeypatch.setattr(workers.InferencePipeline,'restore_frame',fail)
+    state=AppState(args=Namespace())
+    loop=EventLoopThread()
+    raw=loop.submit(_new_queue(2)).result(2)
+    restored=loop.submit(_new_queue(2)).result(2)
+    stop=threading.Event()
+    thread=threading.Thread(target=workers.live_restoration_worker,args=(state,raw,restored,loop.loop,stop))
+    try:
+        thread.start()
+        loop.submit(raw.put(('raw',FRAME_GENERATED,1,0,0,np.zeros((8,8,3),np.uint8),0,0))).result(2)
+        item=loop.submit(restored.get()).result(3)
+        assert item[0]=='error' and 'restoration failed explicitly' in item[1]
+        thread.join(2)
+        assert not thread.is_alive()
+    finally:
+        stop.set();thread.join(3);loop.close()
+
+
+def test_restoration_stops_when_output_queue_is_full(monkeypatch):
+    state=AppState(args=Namespace())
+    loop=EventLoopThread()
+    raw=loop.submit(_new_queue(2)).result(2)
+    restored=loop.submit(_new_queue(1)).result(2)
+    stop=threading.Event()
+    thread=threading.Thread(target=workers.live_restoration_worker,args=(state,raw,restored,loop.loop,stop))
+    attempting_put = threading.Event()
+    original_put = workers.put_blocking
+    def observe_put(q, event_loop, item, stopped):
+        if q is restored:
+            attempting_put.set()
+        return original_put(q, event_loop, item, stopped)
+    monkeypatch.setattr(workers, 'put_blocking', observe_put)
+    try:
+        loop.submit(restored.put(('segment',0))).result(2)
+        loop.submit(raw.put(('segment',1))).result(2)
+        thread.start()
+        assert attempting_put.wait(2)
+        stop.set()
+        thread.join(2)
+        assert not thread.is_alive()
+    finally:
+        stop.set();thread.join(3);loop.close()
+
+
+def test_flush_drains_restored_frames_along_with_other_queues():
+    async def check():
+        session=LiveStreamSession(AppState(args=Namespace()), SimpleNamespace(query_params={}))
+        queues=[asyncio.Queue(maxsize=2) for _ in range(4)]
+        session.raw_queue,session.restored_queue,session.fused_queue,session.network_queue=queues
+        for q in queues:await q.put(('old-frame',))
+        session._drop_queued_frames()
+        assert all(q.empty() for q in queues)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('change', ['queued_epoch', 'queued_avatar', 'inflight_epoch', 'inflight_avatar'])
+def test_gpen_worker_drops_stale_results_and_preserves_control_order(monkeypatch, change):
+    state = AppState()
+    state.model.avatar_revision = 1
+    state.pipeline.flush_seq = 1
+    calls = []
+    def infer(self, image):
+        calls.append(1)
+        if change == 'inflight_epoch':
+            state.pipeline.flush_seq += 1
+        if change == 'inflight_avatar':
+            state.model.avatar_revision += 1
+        return np.full_like(image, 80)
+    monkeypatch.setattr(workers.InferencePipeline, 'infer_restoration', infer)
+    loop_thread = EventLoopThread()
+    prepared, restored = asyncio.Queue(), asyncio.Queue()
+    stop = threading.Event()
+    thread = threading.Thread(target=workers.live_gpen_worker,
+                              args=(state, prepared, restored, loop_thread.loop, stop))
+    thread.start()
+    try:
+        epoch = 0 if change == 'queued_epoch' else 1
+        revision = 0 if change == 'queued_avatar' else 1
+        loop_thread.submit(prepared.put((
+            'raw', FRAME_GENERATED, 99, 123456, 3,
+            np.zeros((512,512,3),np.uint8), epoch, revision,
+            np.zeros((256,256,3),np.uint8), np.eye(2,3),
+        ))).result(timeout=2)
+        loop_thread.submit(prepared.put(('segment_end',99))).result(timeout=2)
+        item = loop_thread.submit(restored.get()).result(timeout=3)
+        assert item == ('segment_end',99)
+        assert calls == ([1] if change.startswith('inflight') else [])
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+        loop_thread.close()
+    assert not thread.is_alive()

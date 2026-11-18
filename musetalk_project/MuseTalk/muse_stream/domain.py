@@ -47,3 +47,4 @@ class Runtime:
     face_parser: Any
     timesteps: Any
     weight_dtype: Any
+    face_restorer: Any = None

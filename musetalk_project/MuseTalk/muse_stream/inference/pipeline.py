@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -78,6 +80,15 @@ class InferencePipeline:
 
     def __init__(self, state: AppState) -> None:
         self.state = state
+        dump_dir = os.environ.get("MUSETALK_MASK_DUMP_DIR", "").strip()
+        self.mask_dump_dir = Path(dump_dir) if dump_dir else None
+        self._dumped_mask_keys: set[tuple[int, tuple[int, ...]]] = set()
+        if self.mask_dump_dir is not None:
+            self.mask_dump_dir.mkdir(parents=True, exist_ok=True)
+            (self.mask_dump_dir / "generated_raw").mkdir(exist_ok=True)
+            (self.mask_dump_dir / "generated_face").mkdir(exist_ok=True)
+            (self.mask_dump_dir / "mask_crop").mkdir(exist_ok=True)
+            (self.mask_dump_dir / "mask_full").mkdir(exist_ok=True)
 
     def iter_segment(self, segment: LiveSegment):
         """Yield timestamped frames, bypassing UNet for silent audio windows."""
@@ -221,7 +232,80 @@ class InferencePipeline:
         frame_index: int,
         res_frame: np.ndarray,
     ) -> np.ndarray:
-        """Blend one generated 256x256 face back into the cached source frame."""
+        """Compatibility path for codecs without separate restoration workers."""
+        return self.composite_frame(
+            frame_index, self.restore_frame(frame_index, res_frame))
+
+    def restore_frame(
+        self,
+        frame_index: int,
+        res_frame: np.ndarray,
+    ) -> np.ndarray:
+        """Restore a generated crop, keeping the source frame untouched."""
+        avatar = self.state.model.avatar
+        assert avatar is not None
+        bbox = avatar.coord_list_cycle[
+            frame_index % len(avatar.coord_list_cycle)
+        ]
+        if tuple(bbox) == (0, 0, 0, 0):
+            return res_frame
+        self._dump_generated_raw(frame_index, res_frame)
+        restorer = getattr(self.state.model.runtime, "face_restorer", None)
+        if restorer is not None:
+            matrices = avatar.restoration_matrices
+            return restorer.restore(
+                res_frame, matrices[frame_index % len(matrices)])
+        return res_frame
+
+    def prepare_restoration(self, frame_index: int, res_frame: np.ndarray):
+        avatar = self.state.model.avatar
+        assert avatar is not None
+        restorer = getattr(self.state.model.runtime, "face_restorer", None)
+        if restorer is None:
+            return res_frame, None, None
+        matrix = avatar.restoration_matrices[
+            frame_index % len(avatar.restoration_matrices)]
+        inverse = avatar.restoration_inverse_matrices[
+            frame_index % len(avatar.restoration_inverse_matrices)]
+        aligned, inverse = restorer.prepare(res_frame, matrix, inverse)
+        return aligned, res_frame, inverse
+
+    def infer_restoration(self, aligned: np.ndarray) -> np.ndarray:
+        restorer = getattr(self.state.model.runtime, "face_restorer", None)
+        return aligned if restorer is None else restorer.infer_aligned(aligned)
+
+    def finalize_restoration(
+        self, restored: np.ndarray, original: np.ndarray, inverse: np.ndarray
+    ) -> np.ndarray:
+        restorer = getattr(self.state.model.runtime, "face_restorer", None)
+        if restorer is None or original is None or inverse is None:
+            return restored
+        return restorer.finalize(restored, original, inverse)
+
+    def finalize_restoration_to_bbox(
+        self,
+        frame_index: int,
+        restored: np.ndarray,
+        original: np.ndarray,
+        inverse: np.ndarray,
+    ) -> np.ndarray:
+        restorer = getattr(self.state.model.runtime, "face_restorer", None)
+        if restorer is None or original is None or inverse is None:
+            return restored
+        bbox = self.state.model.avatar.coord_list_cycle[
+            frame_index % len(self.state.model.avatar.coord_list_cycle)]
+        x1, y1, x2, y2 = (int(value) for value in bbox)
+        result, _ = restorer.finalize_to_bbox(
+            restored, original, inverse, (x2 - x1, y2 - y1))
+        return result
+
+    def composite_frame(
+        self,
+        frame_index: int,
+        res_frame: np.ndarray,
+        already_bbox: bool = False,
+    ) -> np.ndarray:
+        """Paste an already restored crop with the original bbox and mask."""
         from musetalk.utils.blending import get_image_blending
 
         avatar = self.state.model.avatar
@@ -238,9 +322,13 @@ class InferencePipeline:
 
         x1, y1, x2, y2 = bbox
         try:
-            resized = cv2.resize(
-                res_frame.astype(np.uint8),
-                (x2 - x1, y2 - y1),
+            resized = (
+                res_frame.astype(np.uint8)
+                if already_bbox
+                else cv2.resize(
+                    res_frame.astype(np.uint8),
+                    (x2 - x1, y2 - y1),
+                )
             )
         except Exception:
             return ori_frame
@@ -251,10 +339,71 @@ class InferencePipeline:
         mask_crop = avatar.mask_coords_list_cycle[
             frame_index % len(avatar.mask_coords_list_cycle)
         ]
+        self._dump_mask_debug(
+            frame_index=frame_index,
+            generated_face=resized,
+            mask=mask,
+            mask_crop=mask_crop,
+            frame_shape=ori_frame.shape[:2],
+        )
         return get_image_blending(
             ori_frame,
             resized,
             [x1, y1, x2, y2],
             mask,
             mask_crop,
+        )
+
+    def _dump_generated_raw(
+        self,
+        frame_index: int,
+        generated_face: np.ndarray,
+    ) -> None:
+        if self.mask_dump_dir is None:
+            return
+        path = self.mask_dump_dir / "generated_raw" / f"frame_{frame_index:06d}.png"
+        if not path.exists():
+            cv2.imwrite(str(path), generated_face.astype(np.uint8))
+
+    def _dump_mask_debug(
+        self,
+        frame_index: int,
+        generated_face: np.ndarray,
+        mask: np.ndarray,
+        mask_crop: tuple[int, int, int, int],
+        frame_shape: tuple[int, int],
+    ) -> None:
+        """Persist the exact alpha mask used by blending for visual diagnosis."""
+        if self.mask_dump_dir is None:
+            return
+        key = (frame_index % 1000000, tuple(int(v) for v in mask_crop))
+        if key in self._dumped_mask_keys:
+            return
+        self._dumped_mask_keys.add(key)
+        stem = f"frame_{frame_index:06d}"
+        cv2.imwrite(
+            str(self.mask_dump_dir / "generated_face" / f"{stem}.png"),
+            generated_face,
+        )
+        mask_array = np.asarray(mask)
+        if mask_array.ndim == 3:
+            mask_array = cv2.cvtColor(mask_array, cv2.COLOR_BGR2GRAY)
+        cv2.imwrite(
+            str(self.mask_dump_dir / "mask_crop" / f"{stem}.png"),
+            mask_array,
+        )
+        full_mask = np.zeros(frame_shape, dtype=np.uint8)
+        x1, y1, x2, y2 = (int(v) for v in mask_crop)
+        h, w = full_mask.shape
+        x1c, y1c = max(0, x1), max(0, y1)
+        x2c, y2c = min(w, x2), min(h, y2)
+        if x2c > x1c and y2c > y1c:
+            crop = mask_array
+            crop = crop[y1c - y1:y2c - y1, x1c - x1:x2c - x1]
+            if crop.shape != (y2c - y1c, x2c - x1c):
+                crop = cv2.resize(crop, (x2c - x1c, y2c - y1c))
+            full_mask[y1c:y2c, x1c:x2c] = crop
+        cv2.imwrite(
+            str(self.mask_dump_dir / "mask_full" / f"{stem}.png"),
+            full_mask,
         )

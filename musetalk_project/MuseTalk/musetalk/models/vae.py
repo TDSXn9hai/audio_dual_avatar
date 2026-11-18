@@ -12,7 +12,7 @@ class VAE():
     VAE (Variational Autoencoder) class for image processing.
     """
 
-    def __init__(self, model_path="./models/sd-vae-ft-mse/", resized_img=256, use_float16=False):
+    def __init__(self, model_path="./models/sd-vae-ft-mse/", resized_img=None, use_float16=False):
         """
         Initialize the VAE instance.
 
@@ -21,6 +21,10 @@ class VAE():
         :param use_float16: Whether to use float16 precision.
         """
         self.model_path = model_path
+        if resized_img is None:
+            resized_img = int(os.environ.get("MUSETALK_FACE_SIZE", "256"))
+        if resized_img < 64 or resized_img % 8:
+            raise ValueError("MUSETALK_FACE_SIZE must be >=64 and divisible by 8")
         self.vae = AutoencoderKL.from_pretrained(self.model_path)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,7 +80,7 @@ class VAE():
             x = x * (self._mask_tensor>0.5)
         x = self.transform(x)
         
-        x = x.unsqueeze(0) # [1, 3, 256, 256] torch tensor
+        x = x.unsqueeze(0)
         x = x.to(self.vae.device)
 
         return x
