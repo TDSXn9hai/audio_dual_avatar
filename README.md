@@ -88,6 +88,13 @@ H.264/yuv420p，然后生成
 `minicpm_demo/assets/avatar_presets.yaml` 和 `MANIFEST.sha256`。
 新预设会立即出现在 `/avatar` 页面，不需要重启 Gateway 或 MuseTalk。
 
+如果当前配置启用了 GPEN 人脸修复（`MUSETALK_FACE_RESTORATION=gpen`），
+`add_avatar.sh` 会在 MuseTalk cache 生成完成后继续生成 GPEN 对齐 cache。
+因此新形象会同时具备 MuseTalk 原始 cache 和 GPEN v2 对齐 cache，可以直接被启用
+GPEN 的服务加载。GPEN 对齐准备需要独立的 facexlib 环境，默认使用
+`/tmp/avatar-gfpgan-venv/bin/python`；也可以通过 `GPEN_ALIGNMENT_PYTHON`
+指定 Python 路径。
+
 运行脚本前不需要手动执行 `source .venv/bin/activate`。脚本会自动激活共享
 `.venv`；生成视频缓存时会在子进程中切换到 `musetalk_project/venv`，因为只有
 该环境安装了预处理所需的 `mmpose/mmcv`。
@@ -258,6 +265,53 @@ wss://<主机地址>:8006/avatar-live/ws/live?video_codec=h264
 
 不支持 `VideoDecoder` 的客户端可以通过 `video_codec=webp` 使用原有图片帧模式。
 项目内置的 MuseTalk 调试页面和无头 viewer 会显式使用 WebP。
+
+### GPEN 人脸修复与新版形象缓存
+
+项目在 MuseTalk 生成的 256×256 人脸 crop 上增加了可选的 GPEN-BFR-512 人脸修复，
+用于改善生成脸与原始视频底板之间的肤质、颜色和细节差异。修复流程保持 MuseTalk
+的 256 设置：生成 crop 先对齐到 GPEN 的 512×512 输入，GPEN 完成修复后再逆变换、
+mask 融合并贴回原帧。
+
+H.264 流式路径将修复流程拆成异步流水线：
+
+```text
+MuseTalk 256 crop
+  → 对齐线程
+  → GPEN 推理线程
+  → 逆变换 / mask 融合 / bbox 贴回线程
+  → H.264 编码
+```
+
+GPEN 默认关闭。启用方式：
+
+```bash
+MUSETALK_FACE_RESTORATION=gpen ./start_avatar.sh start
+```
+
+GPU 可以在 `.avatar-env` 中分别配置：
+
+```bash
+MINICPM_CUDA_VISIBLE_DEVICES=0
+MUSETALK_CUDA_VISIBLE_DEVICES=0
+GPEN_CUDA_VISIBLE_DEVICES=2
+```
+
+当 MuseTalk 和 GPEN 使用不同物理 GPU 时，MuseTalk 进程会看到例如
+`CUDA_VISIBLE_DEVICES=0,2`，因此日志中的 `GPEN GPU: 2 (cuda:1)`表示 GPEN 使用
+物理 GPU2，`cuda:1`是该进程内部的逻辑编号。
+
+GPEN 对齐文件保存在每个形象 cache 目录的 `gpen_alignment.npz` 中。当前格式为
+v2，除了 256→512 的正向矩阵，还保存了预先计算好的 512→256 逆矩阵，服务运行时
+不再逐帧调用 `cv2.invertAffineTransform`。这项优化不改变图像处理结果，只减少极少量
+CPU 开销。已有旧形象需要重新生成或升级 GPEN 对齐 cache；通过当前版本
+`add_avatar.sh` 创建的新形象会在 GPEN 开启时自动生成 v2 cache。
+
+GPEN 目前会改善肤质一致性，但完整修复、CPU/GPU 数据转换、逆变换、mask 融合和
+贴回仍然带来较大的逐帧开销。当前实测引入 GPEN 后，视频生成链路暂时无法稳定达到
+24 fps 实时播放，可能出现生成队列积压和口型延迟。后续需要继续优化修复后的图像
+变换、贴回融合、编码以及流水线调度；在这些优化完成前，不建议将 GPEN 模式视为
+已经满足实时交互要求的最终配置。
 
 H.264 默认参数为：目标码率 `2M`、最大码率 `3M`、每 120 帧插入一个 IDR。收到
 `flush` 时，服务端会重启编码器并立即生成新的 IDR。可以通过 `.avatar-env` 中的
