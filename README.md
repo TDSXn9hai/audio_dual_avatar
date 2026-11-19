@@ -19,10 +19,26 @@
 ## 安装与启动
 
 ```bash
-./install.sh          # 创建 venv、安装固定版本依赖、准备 ffmpeg 和 TLS 证书、下载权重并校验 sha256
-                      # 可选参数：--hf-mirror --skip-env --skip-weights --no-verify
+./install.sh          # 创建运行时/预处理/GPEN 对齐 venv，准备项目内 ffmpeg 和 TLS 证书，
+                      # 下载权重并校验 sha256
+                      # 可选参数：--hf-mirror --env-only --skip-env
+                      #           --skip-preprocess-env --skip-gpen-env
+                      #           --skip-weights --no-verify
 ./start_avatar.sh     # 启动后访问 https://<主机地址>:8006/avatar
 ./start_avatar.sh stop
+```
+
+安装器会创建三个相互独立的 Python 环境：
+
+- `.venv`：MiniCPM、Gateway、Worker、MuseTalk 实时服务和 GPEN 在线推理；
+- `musetalk_project/venv`：mmpose/mmcv/DWPose 等形象预处理依赖；
+- `musetalk_project/gpen-venv`：GPEN 离线人脸检测和对齐依赖。
+
+ffmpeg 由实时环境中的 `imageio-ffmpeg` 提供，安装器不会优先使用系统 ffmpeg。
+若只想验证环境、ffmpeg 和证书配置而不下载权重，可运行：
+
+```bash
+./install.sh --env-only
 ```
 
 ### 默认 720p 知识分享形象
@@ -91,13 +107,14 @@ H.264/yuv420p，然后生成
 如果当前配置启用了 GPEN 人脸修复（`MUSETALK_FACE_RESTORATION=gpen`），
 `add_avatar.sh` 会在 MuseTalk cache 生成完成后继续生成 GPEN 对齐 cache。
 因此新形象会同时具备 MuseTalk 原始 cache 和 GPEN v2 对齐 cache，可以直接被启用
-GPEN 的服务加载。GPEN 对齐准备需要独立的 facexlib 环境，默认使用
-`/tmp/avatar-gfpgan-venv/bin/python`；也可以通过 `GPEN_ALIGNMENT_PYTHON`
-指定 Python 路径。
+GPEN 的服务加载。GPEN 对齐准备使用安装器创建的
+`musetalk_project/gpen-venv/bin/python`；也可以通过 `GPEN_ALIGNMENT_PYTHON`
+指定其他 Python 路径。
 
-运行脚本前不需要手动执行 `source .venv/bin/activate`。脚本会自动激活共享
+运行脚本前不需要手动执行 `source .venv/bin/activate`。脚本会自动使用共享
 `.venv`；生成视频缓存时会在子进程中切换到 `musetalk_project/venv`，因为只有
-该环境安装了预处理所需的 `mmpose/mmcv`。
+该环境安装了预处理所需的 `mmpose/mmcv`。GPEN 对齐使用独立的
+`musetalk_project/gpen-venv`，不会注入实时环境的 `site-packages`。
 
 常用选项：
 
@@ -345,10 +362,44 @@ H.264 默认参数为：目标码率 `2M`、最大码率 `3M`、每 120 帧插�
 [PLATFORM_INTEGRATION_GUIDE.md](PLATFORM_INTEGRATION_GUIDE.md)。`install.sh` 会检查
 当前使用的 ffmpeg 是否包含 `libx264` 编码器。
 
+### 安装验证与故障定位
+
+安装器依赖宿主机提供 `curl`、`openssl`、`sha256sum` 等基础工具；Python 运行时、
+MuseTalk 预处理和 GPEN 对齐依赖都安装在项目自己的虚拟环境中。权重下载由
+`weights.sha256` 驱动，支持断点续传、已有文件复用和下载后的 SHA256 校验。
+
+不下载权重即可检查环境、ffmpeg 和 TLS 证书：
+
+```bash
+./install.sh --env-only
+```
+
+安装器完成后可以分别检查：
+
+```bash
+.venv/bin/python -c 'import torch, transformers, diffusers, imageio_ffmpeg'
+musetalk_project/venv/bin/python -c 'import torch, mmcv, mmpose'
+musetalk_project/gpen-venv/bin/python -c 'import torch, facexlib'
+```
+
+常用服务验证：
+
+```bash
+./start_avatar.sh status
+.venv/bin/python deployment/smoke_session.py
+AVATAR_SMOKE_CODEC=h264 .venv/bin/python deployment/smoke_session.py
+```
+
+当前系统限制包括：单机默认只支持一个活动数字人会话和一个 MuseTalk viewer；
+GPEN 会增加逐帧处理开销，当前应通过真实客户端验证持续帧率和音画同步，不能仅以
+离线单帧耗时推断实时效果。GPEN 的详细队列、GPU 分流和性能验证记录保存在 Git
+历史与实验产物中。
+
 ## 目录结构
 
 - `minicpm_demo/` — MiniCPM-o 4.5 全双工示例，包含 Gateway、Worker、Backend、Web UI、数字人桥接和 `/avatar` 页面
 - `musetalk_project/MuseTalk/` — 流式 MuseTalk 服务，包含 `muse_stream/` 和 `/ws/minicpm` 输入
+- `musetalk_project/MuseTalk/muse_stream/inference/gpen/` — GPEN 推理、运行时修复和形象对齐工具
 - `install.sh`、`start_avatar.sh`、`add_avatar.sh`、`delete_avatar.sh` — 一键安装、启动和形象管理脚本
 - `requirements-avatar.lock.txt`、`weights.sha256` — 固定依赖版本和模型权重校验文件
 

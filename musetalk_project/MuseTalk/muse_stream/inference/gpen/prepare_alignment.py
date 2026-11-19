@@ -16,8 +16,8 @@ compat.rgb_to_grayscale = rgb_to_grayscale
 sys.modules[compat.__name__] = compat
 from facexlib.utils.face_restoration_helper import FaceRestoreHelper
 
-ROOT = Path(__file__).resolve().parents[1]
-MUSE = ROOT / "musetalk_project/MuseTalk"
+MUSE = Path(__file__).resolve().parents[3]
+ROOT = MUSE.parents[1]
 sys.path.insert(0, str(MUSE))
 from muse_stream.inference.restoration import source_signature
 

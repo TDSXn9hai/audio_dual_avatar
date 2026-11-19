@@ -504,18 +504,16 @@ CREATED_CACHE=1
 
 if [[ "${FACE_RESTORATION_MODE}" == "gpen" ]]; then
     step "[4/7] Generating the GPEN v2 alignment cache"
-    GPEN_ALIGNMENT_PYTHON="${GPEN_ALIGNMENT_PYTHON:-/tmp/avatar-gfpgan-venv/bin/python}"
+    GPEN_ALIGNMENT_PYTHON="${GPEN_ALIGNMENT_PYTHON:-${ROOT}/musetalk_project/gpen-venv/bin/python}"
     [[ -x "${GPEN_ALIGNMENT_PYTHON}" ]] \
         || die "missing GPEN alignment Python: ${GPEN_ALIGNMENT_PYTHON}"
-    GPEN_SITE_PACKAGES="${SHARED_VENV}/lib/python3.10/site-packages"
     CUDA_VISIBLE_DEVICES="${GPU_ID}" \
-    PYTHONPATH="${GPEN_SITE_PACKAGES}" \
     XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
     HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \
     TORCH_HOME="${MUSETALK_PROJECT}/.cache/torch" \
     PYTHONUNBUFFERED=1 \
     "${GPEN_ALIGNMENT_PYTHON}" \
-        "${ROOT}/deployment/prepare_gpen_alignment.py" \
+        "${MUSETALK_DIR}/muse_stream/inference/gpen/prepare_alignment.py" \
         --avatars "${AVATAR_ID}" \
         --device cuda:0 \
         || die "GPEN alignment cache generation failed; generated files were rolled back"

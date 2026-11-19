@@ -40,7 +40,7 @@ def load_alignment_cache(
     path = cache / "gpen_alignment.npz"
     if not path.is_file():
         raise FileNotFoundError(
-            f"Missing GPEN alignment: {path}. Run deployment/prepare_gpen_alignment.py.")
+            f"Missing GPEN alignment: {path}. Run musetalk_project/MuseTalk/muse_stream/inference/gpen/prepare_alignment.py.")
     with np.load(path, allow_pickle=False) as data:
         if int(data["version"]) != 2 or int(data["face_size"]) != 256:
             raise ValueError(f"Unsupported GPEN alignment format: {path}")

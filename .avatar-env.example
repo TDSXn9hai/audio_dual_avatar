@@ -30,7 +30,7 @@ AVATAR_H264_CODEC_STRING=avc1.4D4028
 
 # Restore generated faces before compositing/H.264 encoding: off or gpen.
 # GPEN requires models/gpen/GPEN-BFR-512.pth and per-avatar gpen_alignment.npz.
-# Prepare source alignment with deployment/prepare_gpen_alignment.py first.
+# Prepare source alignment with musetalk_project/MuseTalk/muse_stream/inference/gpen/prepare_alignment.py first.
 MUSETALK_FACE_RESTORATION=off
 # GPEN model runs in a resident child process; "thread" is the local fallback.
 MUSETALK_GPEN_EXECUTION=process

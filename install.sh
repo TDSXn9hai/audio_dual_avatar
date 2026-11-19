@@ -4,18 +4,21 @@
 #   1. Python 3.10 venv at ./.venv with the pinned package set
 #      (requirements-avatar.lock.txt: torch 2.8.0+cu128, transformers 4.51.0 ...)
 #   2. Separate mmpose/mmcv preprocessing venv for avatar creation
-#   3. ffmpeg links, runtime directories, self-signed TLS certificate
-#   4. Model weights: MiniCPM-o 4.5 (~19 GB) and MuseTalk runtime (~4 GB),
+#   3. Separate GPEN alignment venv for avatar creation
+#   4. ffmpeg links, runtime directories, self-signed TLS certificate
+#   5. Model weights: MiniCPM-o 4.5 (~19 GB) and MuseTalk runtime (~4 GB),
 #      checked against weights.sha256
 #
 # Afterwards start everything with ./start_avatar.sh
 #
-# Usage: ./install.sh [--skip-env] [--skip-preprocess-env] [--skip-weights] [--no-verify] [--hf-mirror]
+# Usage: ./install.sh [--skip-env] [--skip-preprocess-env] [--skip-gpen-env]
+#                       [--skip-weights] [--no-verify] [--env-only] [--hf-mirror]
 #
 # Environment overrides:
 #   AVATAR_PYTHON        Python 3.10 executable (default: python3.10, else uv-managed 3.10)
 #   AVATAR_VENV          venv directory (default: ./.venv)
 #   MUSETALK_VENV        MuseTalk preprocessing venv (default: ./musetalk_project/venv)
+#   GPEN_VENV            venv directory (default: ./musetalk_project/gpen-venv)
 #   PIP_INDEX_URL        package index (default: pip config global.index-url, else PyPI)
 #   HF_ENDPOINT          Hugging Face endpoint (default: https://huggingface.co)
 #   HF_TOKEN             optional Hugging Face token
@@ -34,6 +37,9 @@ MUSETALK_DIR="${ROOT}/musetalk_project/MuseTalk"
 MUSETALK_VENV_DIR="${MUSETALK_VENV:-${ROOT}/musetalk_project/venv}"
 MUSETALK_PY="${MUSETALK_VENV_DIR}/bin/python"
 MUSETALK_PREPROCESS_LOCK="${ROOT}/requirements-musetalk-preprocess.lock.txt"
+GPEN_VENV_DIR="${GPEN_VENV:-${ROOT}/musetalk_project/gpen-venv}"
+GPEN_PY="${GPEN_VENV_DIR}/bin/python"
+GPEN_ALIGNMENT_LOCK="${ROOT}/requirements-gpen-alignment.lock.txt"
 AVATAR_CACHE="${MUSETALK_DIR}/results/v15/avatars/musetalk_test_avatar"
 S3FD_REL="musetalk_project/MuseTalk/musetalk/utils/face_detection/detection/sfd/s3fd.pth"
 S3FD_REPO_PATH="n0x1103/s3fd/resolve/main/s3fd-619a316812.pth"
@@ -44,14 +50,18 @@ MINICPM_REVISION="eb4141de24550a3a1a4082f718be58f46b761728"
 
 DO_ENV=1
 DO_PREPROCESS_ENV=1
+DO_GPEN_ENV=1
 DO_WEIGHTS=1
 DO_VERIFY=1
+ENV_ONLY=0
 for arg in "$@"; do
     case "${arg}" in
         --skip-env) DO_ENV=0 ;;
         --skip-preprocess-env) DO_PREPROCESS_ENV=0 ;;
+        --skip-gpen-env) DO_GPEN_ENV=0 ;;
         --skip-weights) DO_WEIGHTS=0 ;;
         --no-verify) DO_VERIFY=0 ;;
+        --env-only) ENV_ONLY=1; DO_WEIGHTS=0; DO_VERIFY=0 ;;
         --hf-mirror) export HF_ENDPOINT="https://hf-mirror.com" ;;
         -h|--help)
             sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -72,6 +82,9 @@ done
 [[ -f "${LOCK_FILE}" ]] || die "missing ${LOCK_FILE}"
 [[ -f "${MUSETALK_PREPROCESS_LOCK}" ]] || die "missing ${MUSETALK_PREPROCESS_LOCK}"
 [[ -f "${WEIGHTS_MANIFEST}" ]] || die "missing ${WEIGHTS_MANIFEST}"
+if [[ "${DO_GPEN_ENV}" -eq 1 ]]; then
+    [[ -f "${GPEN_ALIGNMENT_LOCK}" ]] || die "missing ${GPEN_ALIGNMENT_LOCK}"
+fi
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader || true
 else
@@ -189,12 +202,42 @@ else
     step "[3/6] Skipping MuseTalk preprocessing environment (--skip-preprocess-env)"
 fi
 
-step "[4/6] ffmpeg, runtime directories and TLS certificate"
-if command -v ffmpeg >/dev/null 2>&1 && ffmpeg -version >/dev/null 2>&1; then
-    FFMPEG_EXE="$(command -v ffmpeg)"
+if [[ "${DO_GPEN_ENV}" -eq 1 ]]; then
+    step "[4/7] GPEN alignment environment: ${GPEN_VENV_DIR}"
+    if [[ ! -x "${GPEN_PY}" ]]; then
+        BASE_PY="$(find_python)" || die "Python 3.10 not found for the GPEN alignment environment"
+        "${BASE_PY}" -c 'import sys; assert sys.version_info[:2] == (3, 10), sys.version' \
+            || die "${BASE_PY} is not Python 3.10"
+        if command -v uv >/dev/null 2>&1; then
+            uv venv "${GPEN_VENV_DIR}" --python "${BASE_PY}" --seed
+        else
+            "${BASE_PY}" -m venv "${GPEN_VENV_DIR}"
+        fi
+    fi
+    [[ -x "${GPEN_PY}" ]] || die "GPEN alignment Python is not usable: ${GPEN_PY}"
+    if command -v uv >/dev/null 2>&1; then
+        UV_LINK_MODE="${UV_LINK_MODE:-copy}" uv pip install \
+            --python "${GPEN_PY}" --index-url "${INDEX_URL}" \
+            -r "${GPEN_ALIGNMENT_LOCK}"
+    else
+        "${GPEN_PY}" -m pip install "${PIP_INDEX_ARGS[@]}" --upgrade pip
+        "${GPEN_PY}" -m pip install "${PIP_INDEX_ARGS[@]}" -r "${GPEN_ALIGNMENT_LOCK}"
+    fi
+    "${GPEN_PY}" -m pip check
+    "${GPEN_PY}" - <<'PY'
+import cv2, facexlib, numpy, torch, torchvision
+print(
+    f"GPEN alignment: torch {torch.__version__}, "
+    f"torchvision {torchvision.__version__}, numpy {numpy.__version__}, "
+    f"opencv {cv2.__version__}, facexlib={facexlib.__file__}"
+)
+PY
 else
-    FFMPEG_EXE="$("${PY}" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+    step "[4/7] Skipping GPEN alignment environment (--skip-gpen-env)"
 fi
+
+step "[5/7] ffmpeg, runtime directories and TLS certificate"
+FFMPEG_EXE="$("${PY}" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
 "${FFMPEG_EXE}" -version >/dev/null 2>&1 || die "ffmpeg is not usable: ${FFMPEG_EXE}"
 FFMPEG_ENCODERS="$("${FFMPEG_EXE}" -hide_banner -encoders 2>/dev/null)" \
     || die "failed to inspect ffmpeg encoders: ${FFMPEG_EXE}"
@@ -305,7 +348,7 @@ fetch_group() {  # fetch_group MATCH_REL DEST_REL REPO [REVISION]
 }
 
 if [[ "${DO_WEIGHTS}" -eq 1 ]]; then
-    step "[5/6] Model weights"
+    step "[6/7] Model weights"
     export HF_HOME="${HF_HOME:-${ROOT}/.cache/huggingface}"
     export HF_HUB_DISABLE_TELEMETRY=1
     MT="musetalk_project/MuseTalk/models"
@@ -317,9 +360,19 @@ if [[ "${DO_WEIGHTS}" -eq 1 ]]; then
     fetch_group "${MT}/face-parse-bisent" "${MT}/face-parse-bisent" "ManyOtherFunctions/face-parse-bisent"
     ensure_s3fd
 else
-    step "[5/6] Skipping weight download (--skip-weights)"
+    step "[6/7] Skipping weight download (--skip-weights)"
 fi
-step "[6/6] Checking weights and avatar cache"
+if [[ "${ENV_ONLY}" -eq 1 ]]; then
+    echo "Environment-only mode: skipped model weights, avatar cache and checksum checks."
+    echo
+    echo "Environment setup complete."
+    echo "  Runtime Python: ${PY}"
+    echo "  Preprocess Python: ${MUSETALK_PY}"
+    echo "  GPEN alignment Python: ${GPEN_PY}"
+    echo "  ffmpeg: ${FFMPEG_EXE}"
+    exit 0
+fi
+step "[7/7] Checking weights and avatar cache"
 mapfile -t still_missing < <(missing_under "")
 if [[ ${#still_missing[@]} -gt 0 ]]; then
     printf '  missing: %s\n' "${still_missing[@]}" >&2
