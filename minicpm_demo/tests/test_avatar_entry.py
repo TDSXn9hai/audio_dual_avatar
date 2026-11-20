@@ -36,7 +36,7 @@ def test_avatar_entry_assets_exist():
         assert (avatar_dir / name).is_file(), name
 
 
-def test_default_avatar_and_poster_use_knowledge_video():
+def test_launch_config_and_gateway_agree_on_the_default_duplex_preset():
     root = DEMO_ROOT.parent
     config = yaml.safe_load(
         (
@@ -47,8 +47,11 @@ def test_default_avatar_and_poster_use_knowledge_video():
             / "streaming_duplex_knowledge.yaml"
         ).read_text()
     )
-    assert config["avatar"]["id"] == "knowledge_host_720p"
-    assert config["avatar"]["video_path"] == "data/video/knowledge_host_720p.mp4"
+    presets = yaml.safe_load((DEMO_ROOT / "assets" / "avatar_presets.yaml").read_text())
+    assert presets["default_preset"] == "duplex_motion"
+    assert config["avatar"]["id"] == presets["presets"]["duplex_motion"]["avatar_id"]
+    assert presets["presets"]["knowledge_host_720p"]["avatar_id"] == "knowledge_host_720p"
+    assert [len(config["avatar"]["bases"][base]) for base in ("listen", "speak")] == [2, 2]
     launcher = (root / "start_avatar.sh").read_text()
     assert (
         'MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/'

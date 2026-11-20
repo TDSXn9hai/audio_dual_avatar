@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import LiveSegment, Runtime
+from .avatar_modes import AvatarBaseController, AvatarBaseBundle
 
 
 @dataclass
@@ -47,6 +48,13 @@ class ModelState:
     queue_size: int = 96
     width: int = 480
     height: int = 864
+    avatar_base_configs: dict[str, tuple[object, ...]] = field(
+        default_factory=dict
+    )
+    avatar_base_bundles: dict[str, tuple[AvatarBaseBundle, ...]] = field(
+        default_factory=dict
+    )
+    avatar_base_controller: AvatarBaseController | None = None
 
 
 @dataclass

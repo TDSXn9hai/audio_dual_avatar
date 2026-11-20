@@ -116,18 +116,26 @@ class MiniCPMBridgeSession(StreamAudioSession):
         if kind == "response.output.delta":
             delta = message.get("kind")
             if delta == "audio":
+                self._observe_model_mode("speak")
                 await self._on_audio(
                     message.get("response_id"),
                     message.get("audio"),
                 )
-            elif delta == "listen" and self.turn_open:
-                await self._end_turn("listen")
+            elif delta == "listen":
+                self._observe_model_mode("listen")
+                if self.turn_open:
+                    await self._end_turn("listen")
         elif kind == "bridge.flush":
             self._barge_in(str(message.get("reason") or "force_listen"))
         elif kind in ("session.closed", "bridge.reset"):
             await self._end_turn(kind)
         elif kind == "ping":
             await self.websocket.send_json({"type": "pong"})
+
+    def _observe_model_mode(self, mode: str) -> None:
+        controller = self.state.model.avatar_base_controller
+        if controller is not None:
+            controller.observe_model_mode(mode)
 
     async def _on_audio(self, response_id: Any, audio_b64: Any) -> None:
         if not audio_b64:

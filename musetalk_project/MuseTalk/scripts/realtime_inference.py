@@ -64,12 +64,38 @@ def osmakedirs(path_list):
         os.makedirs(path) if not os.path.exists(path) else None
 
 
+def build_loop(values, loop_mode):
+    """Return the cached sequence for a forward or ping-pong source loop."""
+    if loop_mode == "forward":
+        return list(values)
+    if loop_mode == "pingpong":
+        return list(values) + list(values)[::-1]
+    raise ValueError(
+        f"unsupported avatar loop_mode: {loop_mode}; "
+        "expected pingpong or forward"
+    )
+
+
 @torch.no_grad()
 class Avatar:
-    def __init__(self, avatar_id, video_path, bbox_shift, batch_size, preparation):
+    def __init__(
+        self,
+        avatar_id,
+        video_path,
+        bbox_shift,
+        batch_size,
+        preparation,
+        loop_mode="pingpong",
+    ):
         self.avatar_id = avatar_id
         self.video_path = video_path
         self.bbox_shift = bbox_shift
+        if loop_mode not in {"pingpong", "forward"}:
+            raise ValueError(
+                f"unsupported avatar loop_mode: {loop_mode}; "
+                "expected pingpong or forward"
+            )
+        self.loop_mode = loop_mode
         # 根据版本设置不同的基础路径
         if args.version == "v15":
             self.base_path = f"./results/{args.version}/avatars/{avatar_id}"
@@ -88,7 +114,8 @@ class Avatar:
             "avatar_id": avatar_id,
             "video_path": video_path,
             "bbox_shift": bbox_shift,
-            "version": args.version
+            "version": args.version,
+            "loop_mode": loop_mode,
         }
         self.preparation = preparation
         self.batch_size = batch_size
@@ -201,9 +228,12 @@ class Avatar:
             latents = vae.get_latents_for_unet(resized_crop_frame)
             input_latent_list.append(latents)
 
-        self.frame_list_cycle = frame_list + frame_list[::-1]
-        self.coord_list_cycle = coord_list + coord_list[::-1]
-        self.input_latent_list_cycle = input_latent_list + input_latent_list[::-1]
+        self.frame_list_cycle = build_loop(frame_list, self.loop_mode)
+        self.coord_list_cycle = build_loop(coord_list, self.loop_mode)
+        self.input_latent_list_cycle = build_loop(
+            input_latent_list,
+            self.loop_mode,
+        )
         self.mask_coords_list_cycle = []
         self.mask_list_cycle = []
 
@@ -409,6 +439,9 @@ if __name__ == "__main__":
     for avatar_id in inference_config:
         data_preparation = inference_config[avatar_id]["preparation"]
         video_path = inference_config[avatar_id]["video_path"]
+        loop_mode = str(
+            inference_config[avatar_id].get("loop_mode", "pingpong")
+        ).lower()
         if args.version == "v15":
             bbox_shift = 0
         else:
@@ -418,7 +451,9 @@ if __name__ == "__main__":
             video_path=video_path,
             bbox_shift=bbox_shift,
             batch_size=args.batch_size,
-            preparation=data_preparation)
+            preparation=data_preparation,
+            loop_mode=loop_mode,
+        )
 
         audio_clips = inference_config[avatar_id]["audio_clips"]
         for audio_num, audio_path in audio_clips.items():

@@ -8,13 +8,14 @@ import json
 import pickle
 import queue
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .avatar_modes import AvatarBaseController
 from .config import ROOT
 from .log import log
-from .models import cache_dir_for, load_cached_avatar
+from .models import build_avatar_bases, cache_dir_for, load_cached_avatar
 from .state import AppState
 
 
@@ -236,6 +237,32 @@ def list_avatar_caches(
     return caches
 
 
+def is_duplex_avatar(state: AppState, avatar_id: str) -> bool:
+    configs = state.model.avatar_base_configs
+    return (
+        avatar_id == state.model.default_avatar_id
+        and bool(configs.get("listen"))
+        and bool(configs.get("speak"))
+    )
+
+
+def inspect_duplex_avatar(state: AppState) -> AvatarCacheInfo:
+    avatar_id = state.model.default_avatar_id
+    configs = state.model.avatar_base_configs
+    caches = [
+        inspect_avatar_cache(variant.cache_id, state.args.version)
+        for base in ("listen", "speak")
+        for variant in configs[base]
+    ]
+    for cache in caches:
+        if not cache.valid:
+            return AvatarCacheInfo(avatar_id, False, error=f"{cache.id}: {cache.error}")
+    first = caches[0]
+    if any((cache.width, cache.height) != (first.width, first.height) for cache in caches):
+        return AvatarCacheInfo(avatar_id, False, error="Avatar base dimensions must match")
+    return replace(first, id=avatar_id)
+
+
 def _busy_reason(state: AppState) -> str | None:
     if not state.service.ready or state.model.runtime is None:
         return "服务尚未就绪"
@@ -289,6 +316,8 @@ def _reset_pipeline_after_switch(state: AppState) -> None:
 
 
 def _release_avatar(state: AppState) -> None:
+    state.model.avatar_base_controller = None
+    state.model.avatar_base_bundles = {}
     state.model.avatar = None
     gc.collect()
     # OpenCV/NumPy allocate the decoded frame cache through glibc. Python's
@@ -320,6 +349,35 @@ def _install_avatar(
     return int(width), int(height)
 
 
+def install_duplex_avatar(
+    state: AppState, avatar_id: str, *, increment_revision: bool = True
+) -> tuple[int, int]:
+    bundles = build_avatar_bases(
+        state.args, state.model.runtime, state.model.avatar_base_configs
+    )
+    controller = AvatarBaseController(
+        bundle for values in bundles.values() for bundle in values
+    )
+    dimensions = _install_avatar(
+        state, avatar_id, bundles["listen"][0].avatar,
+        increment_revision=increment_revision,
+    )
+    state.model.avatar_base_bundles = bundles
+    state.model.avatar_base_controller = controller
+    return dimensions
+
+
+def _load_avatar(state: AppState, avatar_id: str, *, increment_revision: bool = True):
+    if is_duplex_avatar(state, avatar_id):
+        return install_duplex_avatar(
+            state, avatar_id, increment_revision=increment_revision
+        )
+    avatar = load_cached_avatar(state.args, state.model.runtime, avatar_id)
+    return _install_avatar(
+        state, avatar_id, avatar, increment_revision=increment_revision
+    )
+
+
 def activate_avatar(
     state: AppState,
     avatar_id: str | None = None,
@@ -336,9 +394,13 @@ def activate_avatar(
         else state.model.default_avatar_id
     )
     target_id = validate_avatar_id(target_id)
-    info = inspect_avatar_cache(target_id, args.version)
+    duplex = is_duplex_avatar(state, target_id)
+    info = (
+        inspect_duplex_avatar(state)
+        if duplex else inspect_avatar_cache(target_id, args.version)
+    )
     if not info.valid:
-        if not cache_dir_for(target_id, args.version).is_dir():
+        if not duplex and not cache_dir_for(target_id, args.version).is_dir():
             raise AvatarNotFoundError(info.error or f"Unknown avatar: {target_id}")
         raise AvatarInvalidError(info.error or f"Invalid avatar: {target_id}")
 
@@ -362,8 +424,7 @@ def activate_avatar(
         try:
             _release_avatar(state)
             _reset_pipeline_after_switch(state)
-            avatar = load_cached_avatar(args, runtime, target_id)
-            width, height = _install_avatar(state, target_id, avatar)
+            width, height = _load_avatar(state, target_id)
             with state.model.avatar_admission_lock:
                 state.model.avatar_ready = True
                 state.model.avatar_switching = False
@@ -388,13 +449,7 @@ def activate_avatar(
             _release_avatar(state)
             if previous_id:
                 try:
-                    previous = load_cached_avatar(args, runtime, previous_id)
-                    _install_avatar(
-                        state,
-                        previous_id,
-                        previous,
-                        increment_revision=False,
-                    )
+                    _load_avatar(state, previous_id, increment_revision=False)
                     with state.model.avatar_admission_lock:
                         state.model.avatar_ready = True
                     log(f"avatar rollback succeeded: id={previous_id}")

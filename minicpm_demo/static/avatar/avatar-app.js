@@ -13,7 +13,8 @@ const storage = {
         try { localStorage.setItem(`avatar.ui.${key}`, String(value)); } catch { /* private browsing */ }
     },
 };
-const AVATAR_PRESET_STORAGE_KEY = 'avatarPreset';
+// Older pages also stored automatically selected defaults under avatarPreset.
+const AVATAR_PRESET_STORAGE_KEY = 'avatarPresetChoice';
 const AVATAR_OWNER_STORAGE_KEY = 'avatar.ownerId';
 const avatarVoiceRefs = new Map();
 const avatarOwnerId = getAvatarOwnerId();
@@ -101,6 +102,13 @@ function setAvatarPresetStatus(text, state = '') {
     el.textContent = text;
     if (state) el.dataset.state = state;
     else delete el.dataset.state;
+}
+
+function refreshAvatarPoster(revision) {
+    const poster = document.querySelector('.portrait-poster');
+    if (poster && Number.isInteger(revision)) {
+        poster.src = `/avatar-live/api/avatar/poster?v=${revision}`;
+    }
 }
 
 function renderAvatarPresets() {
@@ -266,7 +274,6 @@ async function loadAvatarPresets() {
         } else {
             avatarPresetId = available[0]?.id || avatarPresets[0]?.id || '';
         }
-        storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
         avatarPresetsLoaded = true;
         avatarPresetsError = '';
         const preset = selectedAvatarPreset();
@@ -308,6 +315,7 @@ async function selectAvatarPreset(id) {
         }
         avatarPresetId = preset.id;
         storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
+        refreshAvatarPoster(data.avatar_revision);
         const updated = {
             ...preset,
             ...data,
@@ -763,6 +771,8 @@ async function start() {
             } catch { /* keep generic message */ }
             throw new Error(message);
         }
+        const activation = await avatarResponse.json();
+        refreshAvatarPoster(activation.avatar_revision);
         setAvatarPresetStatus('已激活', 'ready');
         renderAvatarPresets();
         if (currentAttempt !== attempt) return;

@@ -462,6 +462,7 @@ cat >"${PREP_CONFIG}" <<EOF
 ${AVATAR_ID}:
   preparation: true
   video_path: data/video/${AVATAR_ID}.mp4
+  loop_mode: pingpong
   bbox_shift: 0
   audio_clips: {}
 EOF

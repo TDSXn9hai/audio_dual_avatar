@@ -34,6 +34,9 @@ class LiveSegment:
     # Last segment of an answer (or a whole file). Set after registration
     # once the upstream ends, so readers must re-check it each time.
     is_final: bool = False
+    base_revision: int = 0
+    base_variant_id: str = ""
+    base_snapshot: Any = None
 
 
 @dataclass

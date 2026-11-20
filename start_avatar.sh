@@ -58,7 +58,7 @@ PYTHON="${VENV_DIR}/bin/python"
 MINICPM_DIR="${ROOT}/minicpm_demo"
 MUSETALK_PROJECT="${ROOT}/musetalk_project"
 MUSETALK_DIR="${MUSETALK_PROJECT}/MuseTalk"
-# The 720p knowledge-sharing avatar is the default. Set MUSETALK_CONFIG to
+# The duplex motion avatar is the default. Set MUSETALK_CONFIG to
 # configs/streaming_duplex.yaml to run the original avatar cache as fallback.
 MUSETALK_CONFIG="${MUSETALK_CONFIG:-configs/streaming_duplex_knowledge.yaml}"
 MUSETALK_PORT="${MUSETALK_PORT:-8000}"
@@ -346,6 +346,7 @@ start_musetalk() {
     setsid -f env \
         CUDA_VISIBLE_DEVICES="${MUSETALK_PROCESS_GPUS}" \
         VIRTUAL_ENV="${VENV_DIR}" \
+        MUSETALK_GPEN_PYTHON="${MUSETALK_GPEN_PYTHON:-${PYTHON}}" \
         PATH="${VENV_DIR}/bin:${MUSETALK_DIR}/ffmpeg-4.4-amd64-static:${PATH}" \
         XDG_CACHE_HOME="${MUSETALK_PROJECT}/.cache" \
         HF_HOME="${MUSETALK_PROJECT}/.cache/huggingface" \

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Request
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 from ..avatar_registry import (
     AvatarError,
     activate_avatar,
+    inspect_duplex_avatar,
+    is_duplex_avatar,
     list_avatar_caches,
 )
 from ..audio.segments import SegmentManager
@@ -29,6 +32,49 @@ class AvatarSelectRequest(BaseModel):
 
 def _state(request: Request) -> AppState:
     return request.app.state.stream_state
+
+
+def _avatar_base_metadata(state: AppState) -> dict[str, Any]:
+    controller = state.model.avatar_base_controller
+    if controller is None:
+        return {
+            "avatar_mode": "single",
+            "active_base": "listen",
+            "active_variant_id": state.model.avatar_id,
+            "pending_base": None,
+            "pending_variant_id": None,
+        }
+
+    snapshot = controller.snapshot_for_segment()
+    active_base = snapshot.base
+    active_variant_id = snapshot.variant_id
+    pending_base = controller.pending_base
+    pending_variant_id = None
+    if pending_base:
+        variants = state.model.avatar_base_bundles.get(pending_base, ())
+        if variants:
+            pending_variant_id = variants[0].variant_id
+    return {
+        "avatar_mode": "duplex",
+        "active_base": active_base,
+        "active_variant_id": active_variant_id,
+        "pending_base": pending_base,
+        "pending_variant_id": pending_variant_id,
+    }
+
+
+def _active_avatar_poster_path(state: AppState) -> Path | None:
+    controller = state.model.avatar_base_controller
+    if controller is not None:
+        snapshot = controller.snapshot_for_segment()
+        avatar = snapshot.bundle.avatar
+    else:
+        avatar = state.model.avatar
+    full_imgs_path = getattr(avatar, "full_imgs_path", "")
+    if not full_imgs_path:
+        return None
+    path = Path(full_imgs_path) / "00000000.png"
+    return path if path.is_file() else None
 
 
 @router.get("/")
@@ -84,6 +130,7 @@ async def status(request: Request) -> dict[str, Any]:
         "avatar_revision": state.model.avatar_revision,
         "avatar_ready": state.model.avatar_ready,
         "avatar_switching": state.model.avatar_switching,
+        **_avatar_base_metadata(state),
         "fps": state.model.fps,
         "face_restoration": restoration,
         "batch_size": args.batch_size if args else state.model.batch_size,
@@ -160,6 +207,9 @@ async def avatars(request: Request) -> dict[str, Any]:
         state.args.version,
         state.model.default_avatar_id,
     )
+    if is_duplex_avatar(state, state.model.default_avatar_id):
+        duplex = await asyncio.to_thread(inspect_duplex_avatar, state)
+        caches = [duplex, *(cache for cache in caches if cache.id != duplex.id)]
     return {
         "default_avatar_id": state.model.default_avatar_id,
         "active_avatar_id": state.model.avatar_id,
@@ -181,7 +231,16 @@ async def current_avatar(request: Request) -> dict[str, Any]:
         "avatar_switching": state.model.avatar_switching,
         "width": state.model.width,
         "height": state.model.height,
+        **_avatar_base_metadata(state),
     }
+
+
+@router.get("/api/avatar/poster")
+async def avatar_poster(request: Request) -> FileResponse:
+    path = _active_avatar_poster_path(_state(request))
+    if path is None:
+        raise HTTPException(status_code=404, detail="Avatar poster is unavailable")
+    return FileResponse(path, media_type="image/png")
 
 
 @router.post("/api/avatar/select")

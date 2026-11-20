@@ -21,6 +21,16 @@ WEB_DIR = ROOT / "web"
 os.chdir(ROOT)
 
 
+@dataclass(frozen=True)
+class AvatarVariantConfig:
+    base: str
+    variant_id: str
+    cache_id: str
+    video_path: str = ""
+    preparation: str = "reuse"
+    loop_mode: str = "pingpong"
+
+
 @dataclass
 class LoadedConfig:
     args: Namespace
@@ -43,6 +53,67 @@ class LoadedConfig:
     stream_pause_boundary_frames: int
     stream_max_pending_windows: int
     stream_max_buffer_seconds: float
+    avatar_bases: dict[str, tuple[AvatarVariantConfig, ...]]
+
+
+def parse_avatar_base_configs(
+    avatar_cfg: dict,
+) -> dict[str, tuple[AvatarVariantConfig, ...]]:
+    """Parse optional listen/speak source declarations."""
+    bases_cfg = avatar_cfg.get("bases")
+    if not bases_cfg:
+        avatar_id = str(avatar_cfg.get("id", "")).strip()
+        video_path = str(avatar_cfg.get("video_path", "")).strip()
+        if not avatar_id:
+            raise ValueError("avatar.id is required")
+        return {
+            "listen": (
+                AvatarVariantConfig(
+                    base="listen",
+                    variant_id=avatar_id,
+                    cache_id=avatar_id,
+                    video_path=video_path,
+                ),
+            ),
+            "speak": (),
+        }
+
+    parsed: dict[str, tuple[AvatarVariantConfig, ...]] = {}
+    for base in ("listen", "speak"):
+        entries = bases_cfg.get(base, [])
+        values: list[AvatarVariantConfig] = []
+        for index, entry in enumerate(entries):
+            variant_id = str(
+                entry.get("id") or entry.get("variant_id") or ""
+            ).strip()
+            cache_id = str(entry.get("cache_id") or variant_id).strip()
+            if not variant_id or not cache_id:
+                raise ValueError(
+                    f"avatar.bases.{base}[{index}] requires id and cache_id"
+                )
+            values.append(
+                AvatarVariantConfig(
+                    base=base,
+                    variant_id=variant_id,
+                    cache_id=cache_id,
+                    video_path=str(entry.get("video_path") or "").strip(),
+                    preparation=str(
+                        entry.get("preparation") or "reuse"
+                    ).lower(),
+                    loop_mode=str(
+                        entry.get("loop_mode") or "pingpong"
+                    ).lower(),
+                )
+            )
+            if values[-1].loop_mode not in ("pingpong", "forward"):
+                raise ValueError(
+                    f"avatar.bases.{base}[{index}].loop_mode must be "
+                    "pingpong or forward"
+                )
+        parsed[base] = tuple(values)
+    if not parsed["listen"]:
+        raise ValueError("avatar.bases.listen requires at least one variant")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,6 +147,7 @@ def load_config(config_name: str) -> LoadedConfig:
         raise ValueError("avatar.id is required")
     if not video_path:
         raise ValueError("avatar.video_path is required")
+    avatar_bases = parse_avatar_base_configs(avatar_cfg)
 
     version = str(models_cfg.get("version", "v15"))
     if version not in ("v1", "v15"):
@@ -345,6 +417,7 @@ def load_config(config_name: str) -> LoadedConfig:
         stream_pause_boundary_frames=stream_pause_boundary_frames,
         stream_max_pending_windows=stream_max_pending_windows,
         stream_max_buffer_seconds=stream_max_buffer_seconds,
+        avatar_bases=avatar_bases,
     )
 
 
@@ -356,6 +429,7 @@ def configure_state(state: AppState, loaded: LoadedConfig) -> None:
     state.model.batch_size = loaded.batch_size
     state.model.prebuffer = loaded.prebuffer
     state.model.queue_size = loaded.queue_size
+    state.model.avatar_base_configs = loaded.avatar_bases
     state.ingest.audio_dir = loaded.audio_dir
     state.ingest.output_audio_dir = loaded.live_audio_dir
     state.stream_input.sample_rate = loaded.stream_sample_rate

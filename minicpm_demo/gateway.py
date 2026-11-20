@@ -2212,6 +2212,24 @@ async def avatar_live_current():
         raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
 
 
+@app.get("/avatar-live/api/avatar/poster")
+async def avatar_live_poster():
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{base}/api/avatar/poster")
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "image/png"),
+            headers={"Cache-Control": "no-store"},
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
+
+
 @app.post("/avatar-live/api/avatar/select")
 async def avatar_live_select(request: Request):
     base = avatar_http_url()

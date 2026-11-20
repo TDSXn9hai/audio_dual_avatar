@@ -41,10 +41,11 @@ ffmpeg 由实时环境中的 `imageio-ffmpeg` 提供，安装器不会优先使�
 ./install.sh --env-only
 ```
 
-### 默认 720p 知识分享形象
+### 默认双工形态切换
 
-`./start_avatar.sh` 现在默认启动 720p 知识分享形象。原有的
-`musetalk_test_avatar` 配置和缓存仍保留，可作为备用形象。
+`./start_avatar.sh` 默认启用「双工形态切换」预设 (`duplex_motion`)。
+可在数字人页面选择「知识分享」来使用原来的 720p 单视频形象。
+若需要重新构建「知识分享」缓存，可执行：
 
 ```bash
 # 使用支持 mmpose 的虚拟环境，构建一次独立的数字人缓存。
@@ -74,6 +75,26 @@ musetalk_project/MuseTalk/results/v15/avatars/knowledge_host_720p/
 
 仓库同时内置三套完整缓存：`knowledge_host_720p`、`musetalk_test_avatar` 和
 `ecommerce`。部署时无需重新生成缓存，可直接通过形象预设切换。
+
+### 双工会话的 listen/speak 底板
+
+默认双工配置支持四套独立的 MuseTalk v15 cache：
+
+```text
+listen：聆听.mp4、聆听2.mp4
+speak：肢体.mp4、肢体2.mp4
+```
+
+四个视频需要分别预处理为 `duplex_listen_1`、`duplex_listen_2`、
+`duplex_speak_1` 和 `duplex_speak_2`。预处理应使用与其他 MuseTalk avatar
+相同的 v15 参数，并确认四套 cache 的分辨率一致。配置文件中的
+`avatar.bases` 保存底板类别、cache id、源视频路径和 `loop_mode: forward`。
+双工底板按视频原始方向从首帧播放到尾帧，再从首帧开始下一轮，不拼接倒放帧。
+原来的单视频配置默认仍使用 `pingpong` 循环。
+
+MiniCPM 的音频输出不会等待底板切换。`listen` 底板可以继续承载说话音频，
+底板在当前源视频循环结束后切换到目标类别。正常状态切换不会发送 flush，
+也不会重置 H.264/WebP 播放时间线。用户主动打断仍使用原有 flush 语义。
 
 ### 通过脚本添加新形象
 

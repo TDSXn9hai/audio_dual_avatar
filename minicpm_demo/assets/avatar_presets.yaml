@@ -1,6 +1,15 @@
 version: 1
-default_preset: knowledge_host_720p
+default_preset: duplex_motion
 presets:
+  duplex_motion:
+    name: 双工形态切换
+    description: 根据聆听和说话状态切换视频底板
+    source: system
+    avatar_id: duplex_motion
+    voice_ref: assets/ref_audio/ref_avatar_default.wav
+    prompt_file: assets/prompts/avatar/knowledge_host.txt
+    order: 5
+    enabled: true
   knowledge_host_720p:
     name: 知识分享
     description: 720p 知识传播数字人

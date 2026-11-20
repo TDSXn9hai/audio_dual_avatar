@@ -160,6 +160,7 @@ class SegmentManager:
         core_frames: int | None = None,
         extra_frames: int = 0,
         pause_extra_frames: int = 0,
+        base_snapshot: Any = None,
     ) -> LiveSegment | None:
         state = self.state
         assert state.ingest.output_audio_dir is not None
@@ -224,6 +225,7 @@ class SegmentManager:
             playback_wav_path=playback_wav_path,
             extra_frames=extra_frames,
             pause_extra_frames=pause_extra_frames,
+            base_snapshot=base_snapshot,
         )
 
     def _register_wav(
@@ -239,6 +241,7 @@ class SegmentManager:
         extra_frames: int = 0,
         pause_extra_frames: int = 0,
         is_final: bool = False,
+        base_snapshot: Any = None,
     ) -> LiveSegment | None:
         state = self.state
         args = state.args
@@ -381,6 +384,17 @@ class SegmentManager:
             extra_frames=requested_extra,
             pause_boundary=pause_boundary,
             is_final=is_final,
+            base_revision=(
+                int(base_snapshot.revision)
+                if base_snapshot is not None
+                else 0
+            ),
+            base_variant_id=(
+                str(base_snapshot.variant_id)
+                if base_snapshot is not None
+                else ""
+            ),
+            base_snapshot=base_snapshot,
         )
         with state.pipeline.lock:
             state.pipeline.segments[segment_id] = segment
@@ -544,6 +558,9 @@ class InterruptManager:
                 extra_frames = 0
                 pause_boundary = False
                 global_start = source.global_start_frame + frame
+                base_revision = source.base_revision
+                base_variant_id = source.base_variant_id
+                base_snapshot = source.base_snapshot
             else:
                 log("interrupt trim failed; falling back to restarting the segment")
                 wav_path = source.wav_path
@@ -561,6 +578,9 @@ class InterruptManager:
                 extra_frames = source.extra_frames
                 pause_boundary = source.pause_boundary
                 global_start = source.global_start_frame
+                base_revision = source.base_revision
+                base_variant_id = source.base_variant_id
+                base_snapshot = source.base_snapshot
         else:
             wav_path = source.wav_path
             duration = source.duration
@@ -577,6 +597,9 @@ class InterruptManager:
             extra_frames = source.extra_frames
             pause_boundary = source.pause_boundary
             global_start = source.global_start_frame
+            base_revision = source.base_revision
+            base_variant_id = source.base_variant_id
+            base_snapshot = source.base_snapshot
 
         segment = LiveSegment(
             id=segment_id,
@@ -600,6 +623,9 @@ class InterruptManager:
             extra_frames=extra_frames,
             pause_boundary=pause_boundary,
             is_final=source.is_final,
+            base_revision=base_revision,
+            base_variant_id=base_variant_id,
+            base_snapshot=base_snapshot,
         )
         with state.pipeline.lock:
             state.pipeline.segments[segment_id] = segment
@@ -638,6 +664,9 @@ class InterruptManager:
             extra_frames=source.extra_frames,
             pause_boundary=source.pause_boundary,
             is_final=source.is_final,
+            base_revision=source.base_revision,
+            base_variant_id=source.base_variant_id,
+            base_snapshot=source.base_snapshot,
         )
         with state.pipeline.lock:
             state.pipeline.segments[segment_id] = clone

@@ -1,0 +1,27 @@
+duplex_listen_1:
+  preparation: true
+  loop_mode: forward
+  video_path: data/video/duplex_listen_1.mp4
+  bbox_shift: 0
+  audio_clips: {}
+
+duplex_listen_2:
+  preparation: true
+  loop_mode: forward
+  video_path: data/video/duplex_listen_2.mp4
+  bbox_shift: 0
+  audio_clips: {}
+
+duplex_speak_1:
+  preparation: true
+  loop_mode: forward
+  video_path: data/video/duplex_speak_1.mp4
+  bbox_shift: 0
+  audio_clips: {}
+
+duplex_speak_2:
+  preparation: true
+  loop_mode: forward
+  video_path: data/video/duplex_speak_2.mp4
+  bbox_shift: 0
+  audio_clips: {}

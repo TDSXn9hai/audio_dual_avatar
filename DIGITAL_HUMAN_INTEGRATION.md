@@ -92,14 +92,32 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
 |---|---|
 | `kind:"audio"`，新的 `response_id` | 开始新的一轮：重置窗口计数（首窗 20 帧）、重建重采样器、补 40ms 零 |
 | `kind:"audio"`，同一 `response_id` | 重采样后送入窗口切分 |
-| `kind:"listen"`（且本轮已开始） | 轮次结束：冲刷重采样尾部，剩余音频切成最后一窗，标记 `is_final`（worker 停止补 hold 帧） |
-| 听的阶段每秒一次的 `listen` | 忽略（只认"说话 → 听"的切换） |
+| `kind:"listen"` | 更新底板目标；如果本轮已开始，冲刷重采样尾部，剩余音频切成最后一窗，标记 `is_final`（worker 停止补 hold 帧） |
+| 听的阶段每秒一次的 `listen` | 更新底板目标，不创建新媒体段 |
 | `bridge.flush`（客户端 force_listen） | 打断：清空全部内容，不恢复 |
 | 没收到 `listen` 就出现新 `response_id` | 视为打断，清空 |
 | 已被清空的 `response_id` 迟到的音频块 | 丢弃 |
 | `session.closed` / `bridge.reset` / 断开 | 结束当前轮 |
 
 - 上一轮已正常 `listen` 结束、尾音还在播放时出现新回答：**排在后面播放，不清空**。最初设计是清空，但回放录制会话时发现 MiniCPM-o 可能 1.4 秒后就开始下一轮，而 MuseTalk 管线约有 1 秒以上延迟，会把正常回答的结尾切掉。
+
+### 3.6 双工底板状态调度
+
+默认双工配置可以同时加载两类底板资源。`listen` 类使用聆听视频，
+`speak` 类使用肢体视频。每类可以配置多个 variant，服务端在模式真正切换
+时按确定性顺序轮换 variant。
+
+双工底板 cache 使用 `loop_mode: forward`，每轮按源视频首帧到尾帧播放，
+然后从首帧开始下一轮。原有单 avatar 配置继续使用默认的首尾往返循环。
+
+MiniCPM 的 `audio` 和 `listen` 事件会立即更新目标底板，但不会延迟音频
+segment。当前底板继续输出到自己的循环边界，后续空闲帧或新 segment 再使用
+目标底板。这样 `listen` 底板可以承载说话音频，短回复也不会强制产生一次
+肢体动作。
+
+每个音频 segment 捕获创建时的底板资源快照。源帧、坐标、mask、latent 和
+GPEN 对齐数据在同一个 segment 内保持一致。底板切换不改变全局
+`frame_index`、PTS、ACK、音频段顺序和 H.264/WebP 编码器生命周期。
 
 ### 3.5 打断与清空
 
@@ -140,7 +158,7 @@ tar -xzf digital_human_avatar_20261030.tar.gz && cd full_avatar_project
   - 在 `_send_controls()` 中检测 `flush_seq` 变化，丢弃已排队帧并推送 `flush` 消息。
   - **修复原有缺陷**：viewer 在空闲时断开，服务端主循环可能永远不再发送数据、检测不到断开，导致之后所有新 viewer 被"已有直播观众连接"拒绝（刷新页面就进不去）。现在 ACK 读取任务发现连接关闭时置位 `viewer_gone`，主循环据此退出。
 - `web/app.js`（MuseTalk 自带调试页）、`headless_live_viewer.py`：处理 `flush` 消息。
-- 默认配置 `configs/streaming_duplex_knowledge.yaml` 使用 720P 知识分享形象；备用配置 `configs/streaming_duplex.yaml` 使用原 `musetalk_test_avatar` 缓存。流式参数相对原配置的区别：
+- 默认配置 `configs/streaming_duplex_knowledge.yaml` 使用「双工形态切换」预设。页面上的「知识分享」预设使用原 720p 单视频缓存。备用配置 `configs/streaming_duplex.yaml` 使用 `musetalk_test_avatar` 缓存。流式参数相对原配置的区别：
 
 | 配置项 | 值 | 原值 |
 |---|---|---|

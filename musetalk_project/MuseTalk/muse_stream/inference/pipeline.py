@@ -21,7 +21,6 @@ def iter_speech_batches(
     frame_indices: list[int],
     batch_size: int,
     device,
-    frame_offset: int = 0,
     whisper_offset: int = 0,
 ):
     """Yield fixed-size batches, padding the final partial batch.
@@ -38,13 +37,7 @@ def iter_speech_batches(
         whisper_batch = torch.stack(
             [whisper_chunks[whisper_offset + i] for i in batch_indices]
         )
-        latent_batch = torch.cat(
-            [
-                latents[(frame_offset + i) % len(latents)]
-                for i in batch_indices
-            ],
-            dim=0,
-        )
+        latent_batch = torch.cat([latents[i] for i in batch_indices], dim=0)
         if valid < batch_size:
             repeats = batch_size - valid
             whisper_batch = torch.cat(
@@ -90,14 +83,13 @@ class InferencePipeline:
             (self.mask_dump_dir / "mask_crop").mkdir(exist_ok=True)
             (self.mask_dump_dir / "mask_full").mkdir(exist_ok=True)
 
-    def iter_segment(self, segment: LiveSegment):
+    def iter_segment(self, segment: LiveSegment, frame_bases=None):
         """Yield timestamped frames, bypassing UNet for silent audio windows."""
         import torch
 
         state = self.state
         runtime = state.model.runtime
-        avatar = state.model.avatar
-        assert runtime is not None and avatar is not None
+        assert runtime is not None and state.model.avatar is not None
         args = state.args
         assert args is not None
 
@@ -143,6 +135,20 @@ class InferencePipeline:
         if feature_frames < inference_frames:
             speech_mask[feature_frames:] = False
 
+        def source_at(offset):
+            snapshot = (
+                frame_bases[offset] if frame_bases is not None else segment.base_snapshot
+            )
+            frame_index = segment.global_start_frame + offset
+            if snapshot is not None:
+                return snapshot.bundle.avatar, snapshot.source_frame(frame_index)
+            return state.model.avatar, frame_index
+
+        def source_image(offset):
+            avatar, source_index = source_at(offset)
+            cycle = avatar.frame_list_cycle
+            return cycle[source_index % len(cycle)]
+
         silent_frames = int(inference_frames - speech_mask.sum())
         generated_frames = int(speech_mask.sum())
         log(
@@ -164,24 +170,26 @@ class InferencePipeline:
                     yield (
                         "silent",
                         frame_index,
-                        avatar.frame_list_cycle[
-                            frame_index % len(avatar.frame_list_cycle)
-                        ],
+                        source_image(cursor),
                     )
                     cursor += 1
 
                 frame_indices = list(range(run_start, run_end))
+                latents = {}
+                for i in frame_indices:
+                    avatar, source_index = source_at(i)
+                    cycle = avatar.input_latent_list_cycle
+                    latents[i] = cycle[source_index % len(cycle)]
                 for (
                     batch_indices,
                     whisper_batch,
                     latent_batch,
                 ) in iter_speech_batches(
                     whisper_chunks,
-                    avatar.input_latent_list_cycle,
+                    latents,
                     frame_indices,
                     args.batch_size,
                     runtime.device,
-                    frame_offset=segment.global_start_frame,
                     whisper_offset=frame_offset,
                 ):
                     audio_feature_batch = runtime.pe(whisper_batch)
@@ -221,9 +229,7 @@ class InferencePipeline:
                 yield (
                     "silent",
                     frame_index,
-                    avatar.frame_list_cycle[
-                        frame_index % len(avatar.frame_list_cycle)
-                    ],
+                    source_image(cursor),
                 )
                 cursor += 1
 
@@ -231,21 +237,31 @@ class InferencePipeline:
         self,
         frame_index: int,
         res_frame: np.ndarray,
+        snapshot=None,
     ) -> np.ndarray:
         """Compatibility path for codecs without separate restoration workers."""
         return self.composite_frame(
-            frame_index, self.restore_frame(frame_index, res_frame))
+            frame_index,
+            self.restore_frame(frame_index, res_frame, snapshot),
+            snapshot=snapshot,
+        )
 
     def restore_frame(
         self,
         frame_index: int,
         res_frame: np.ndarray,
+        snapshot=None,
     ) -> np.ndarray:
         """Restore a generated crop, keeping the source frame untouched."""
-        avatar = self.state.model.avatar
+        avatar = (
+            snapshot.bundle.avatar
+            if snapshot is not None
+            else self.state.model.avatar
+        )
         assert avatar is not None
+        source_index = snapshot.source_frame(frame_index) if snapshot is not None else frame_index
         bbox = avatar.coord_list_cycle[
-            frame_index % len(avatar.coord_list_cycle)
+            source_index % len(avatar.coord_list_cycle)
         ]
         if tuple(bbox) == (0, 0, 0, 0):
             return res_frame
@@ -254,19 +270,29 @@ class InferencePipeline:
         if restorer is not None:
             matrices = avatar.restoration_matrices
             return restorer.restore(
-                res_frame, matrices[frame_index % len(matrices)])
+                res_frame, matrices[source_index % len(matrices)])
         return res_frame
 
-    def prepare_restoration(self, frame_index: int, res_frame: np.ndarray):
-        avatar = self.state.model.avatar
+    def prepare_restoration(
+        self,
+        frame_index: int,
+        res_frame: np.ndarray,
+        snapshot=None,
+    ):
+        avatar = (
+            snapshot.bundle.avatar
+            if snapshot is not None
+            else self.state.model.avatar
+        )
         assert avatar is not None
         restorer = getattr(self.state.model.runtime, "face_restorer", None)
         if restorer is None:
             return res_frame, None, None
+        source_index = snapshot.source_frame(frame_index) if snapshot is not None else frame_index
         matrix = avatar.restoration_matrices[
-            frame_index % len(avatar.restoration_matrices)]
+            source_index % len(avatar.restoration_matrices)]
         inverse = avatar.restoration_inverse_matrices[
-            frame_index % len(avatar.restoration_inverse_matrices)]
+            source_index % len(avatar.restoration_inverse_matrices)]
         aligned, inverse = restorer.prepare(res_frame, matrix, inverse)
         return aligned, res_frame, inverse
 
@@ -288,12 +314,18 @@ class InferencePipeline:
         restored: np.ndarray,
         original: np.ndarray,
         inverse: np.ndarray,
+        snapshot=None,
     ) -> np.ndarray:
         restorer = getattr(self.state.model.runtime, "face_restorer", None)
         if restorer is None or original is None or inverse is None:
             return restored
-        bbox = self.state.model.avatar.coord_list_cycle[
-            frame_index % len(self.state.model.avatar.coord_list_cycle)]
+        avatar = (
+            snapshot.bundle.avatar
+            if snapshot is not None
+            else self.state.model.avatar
+        )
+        source_index = snapshot.source_frame(frame_index) if snapshot is not None else frame_index
+        bbox = avatar.coord_list_cycle[source_index % len(avatar.coord_list_cycle)]
         x1, y1, x2, y2 = (int(value) for value in bbox)
         result, _ = restorer.finalize_to_bbox(
             restored, original, inverse, (x2 - x1, y2 - y1))
@@ -304,17 +336,23 @@ class InferencePipeline:
         frame_index: int,
         res_frame: np.ndarray,
         already_bbox: bool = False,
+        snapshot=None,
     ) -> np.ndarray:
         """Paste an already restored crop with the original bbox and mask."""
         from musetalk.utils.blending import get_image_blending
 
-        avatar = self.state.model.avatar
+        avatar = (
+            snapshot.bundle.avatar
+            if snapshot is not None
+            else self.state.model.avatar
+        )
         assert avatar is not None
+        source_index = snapshot.source_frame(frame_index) if snapshot is not None else frame_index
         bbox = avatar.coord_list_cycle[
-            frame_index % len(avatar.coord_list_cycle)
+            source_index % len(avatar.coord_list_cycle)
         ]
         ori_frame = avatar.frame_list_cycle[
-            frame_index % len(avatar.frame_list_cycle)
+            source_index % len(avatar.frame_list_cycle)
         ]
 
         if tuple(bbox) == (0, 0, 0, 0):
@@ -334,10 +372,10 @@ class InferencePipeline:
             return ori_frame
 
         mask = avatar.mask_list_cycle[
-            frame_index % len(avatar.mask_list_cycle)
+            source_index % len(avatar.mask_list_cycle)
         ]
         mask_crop = avatar.mask_coords_list_cycle[
-            frame_index % len(avatar.mask_coords_list_cycle)
+            source_index % len(avatar.mask_coords_list_cycle)
         ]
         self._dump_mask_debug(
             frame_index=frame_index,

@@ -51,8 +51,9 @@ def test_repository_avatar_presets_are_config_driven() -> None:
     registry = AvatarPresetRegistry(DEMO_ROOT)
     config = registry.load()
 
-    assert config.default_preset_id == "knowledge_host_720p"
+    assert config.default_preset_id == "duplex_motion"
     assert [preset.id for preset in config.presets] == [
+        "duplex_motion",
         "knowledge_host_720p",
         "musetalk_test_avatar",
         "ecommerce",
@@ -82,6 +83,16 @@ def test_repository_avatar_presets_are_config_driven() -> None:
     assert ecommerce["cache"]["width"] == 768
     assert ecommerce["voice"]["name"] == "ref_minicpm_signature.wav"
     assert "电商导购" in ecommerce["prompt"]["text"]
+
+
+def test_default_preset_falls_back_when_duplex_is_not_configured() -> None:
+    registry = AvatarPresetRegistry(DEMO_ROOT)
+    status = _avatar_status()
+    status["default_avatar_id"] = "musetalk_test_avatar"
+    assert registry.public_list(status)["default_preset_id"] == "musetalk_test_avatar"
+
+    status["avatars"].append({"id": "duplex_motion", "valid": True})
+    assert registry.public_list(status)["default_preset_id"] == "duplex_motion"
 
 
 def test_missing_cache_keeps_preset_visible_but_unavailable() -> None:

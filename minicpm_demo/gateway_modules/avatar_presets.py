@@ -295,11 +295,29 @@ class AvatarPresetRegistry:
             )
         ]
         return {
-            "default_preset_id": config.default_preset_id,
+            "default_preset_id": self.default_preset_for(avatar_status),
             "active_avatar_id": avatar_status.get("active_avatar_id"),
             "avatar_revision": avatar_status.get("avatar_revision"),
             "presets": items,
         }
+
+    def default_preset_for(self, avatar_status: Dict[str, Any]) -> str:
+        config = self.load()
+        valid_ids = {
+            cache.get("id") for cache in avatar_status.get("avatars", [])
+            if cache.get("valid")
+        }
+        preferred = next(p for p in config.presets if p.id == config.default_preset_id)
+        if preferred.avatar_id in valid_ids:
+            return preferred.id
+        fallback_id = avatar_status.get("default_avatar_id")
+        for preset in config.presets:
+            if (
+                preset.enabled and preset.visibility == "public"
+                and preset.avatar_id == fallback_id and fallback_id in valid_ids
+            ):
+                return preset.id
+        return preferred.id
 
     def public_item(
         self,

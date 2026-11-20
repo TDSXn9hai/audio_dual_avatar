@@ -21,8 +21,8 @@ class _PresetConfig:
 
 
 class _PresetRegistry:
-    def load(self):
-        return _PresetConfig()
+    def default_preset_for(self, avatar_status):
+        return _PresetConfig.default_preset_id
 
     def public_item(self, preset_id, avatar_status, owner_id=None):
         assert preset_id == "knowledge_host_720p"

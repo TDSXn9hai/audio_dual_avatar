@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from muse_stream.api.app import create_app
+from muse_stream.avatar_modes import AvatarBaseBundle, AvatarBaseController
 from muse_stream.avatar_registry import (
     AvatarBusyError,
     AvatarActivationError,
@@ -16,6 +18,7 @@ from muse_stream.avatar_registry import (
     inspect_avatar_cache,
     list_avatar_caches,
 )
+from muse_stream.config import AvatarVariantConfig
 from muse_stream.models import cache_dir_for
 from muse_stream.state import AppState
 
@@ -190,6 +193,61 @@ def test_avatar_http_api_lists_and_selects_cache(monkeypatch) -> None:
     assert missing.json()["detail"]["code"] == "avatar_not_found"
 
 
+def test_duplex_avatar_status_and_poster_use_active_listen_base(tmp_path) -> None:
+    state = _state()
+    state.args = Namespace(
+        version="v15",
+        batch_size=28,
+        audio_dir="",
+        idle_timeout_seconds=30,
+        interrupt_wait_seconds=10,
+        interrupt_resume_mode="restart",
+        max_prefetch_seconds=4,
+        input_mode="stream",
+        stream_context_left_ms=200,
+        stream_context_right_ms=167,
+        stream_overlap_frames=4,
+        stream_pause_overlap_frames=4,
+        stream_pause_boundary_frames=6,
+        feature_window_mode="legacy",
+        feature_window_left=4,
+        feature_window_right=6,
+    )
+    poster = tmp_path / "full_imgs" / "00000000.png"
+    poster.parent.mkdir()
+    Image.new("RGB", (8, 12), color=(12, 34, 56)).save(poster)
+    avatar = SimpleNamespace(full_imgs_path=str(poster.parent))
+    listen = AvatarBaseBundle(
+        base="listen",
+        variant_id="listen-1",
+        cycle_length=107,
+        avatar=avatar,
+    )
+    speak = AvatarBaseBundle(
+        base="speak",
+        variant_id="speak-1",
+        cycle_length=107,
+        avatar=SimpleNamespace(full_imgs_path=str(tmp_path / "speak")),
+    )
+    state.model.avatar_base_controller = AvatarBaseController(
+        (listen, speak),
+        initial_base="listen",
+    )
+    state.model.avatar_ready = True
+    state.model.avatar_id = "duplex_listen_1"
+    client = TestClient(create_app(state))
+
+    status = client.get("/api/status")
+    assert status.status_code == 200
+    assert status.json()["active_base"] == "listen"
+    assert status.json()["active_variant_id"] == "listen-1"
+    assert status.json()["pending_base"] is None
+
+    response = client.get("/api/avatar/poster")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+
+
 def test_failed_activation_rolls_back_previous_avatar(monkeypatch) -> None:
     state = _state()
     state.model.avatar_id = "knowledge_host_720p"
@@ -231,3 +289,50 @@ def test_failed_activation_rolls_back_previous_avatar(monkeypatch) -> None:
     assert state.model.avatar_id == "knowledge_host_720p"
     assert state.model.avatar_ready
     assert state.model.avatar_revision == 3
+
+
+def test_duplex_preset_can_switch_to_knowledge_and_back(monkeypatch, tmp_path) -> None:
+    state = _state()
+    state.model.default_avatar_id = "duplex_motion"
+    state.model.avatar_base_configs = {
+        "listen": (AvatarVariantConfig("listen", "listen-1", "duplex_listen_1", loop_mode="forward"),),
+        "speak": (AvatarVariantConfig("speak", "speak-1", "duplex_speak_1", loop_mode="forward"),),
+    }
+
+    def inspect(cache_id, version):
+        return AvatarCacheInfo(cache_id, True, 768, 1344, 107, 107)
+
+    def load(args, runtime, cache_id):
+        if cache_id == "duplex_motion":
+            pytest.fail("The duplex preset must load its component caches")
+        return SimpleNamespace(
+            avatar_id=cache_id,
+            frame_list_cycle=[np.zeros((12, 8, 3), dtype=np.uint8)],
+        )
+
+    monkeypatch.setattr("muse_stream.avatar_registry.inspect_avatar_cache", inspect)
+    monkeypatch.setattr("muse_stream.avatar_registry.load_cached_avatar", load)
+    monkeypatch.setattr("muse_stream.models.load_cached_avatar", load)
+    monkeypatch.setattr("muse_stream.models.cache_dir_for", lambda avatar_id, version: tmp_path / avatar_id)
+    monkeypatch.setattr("muse_stream.api.routes.list_avatar_caches", lambda *args: [])
+    client = TestClient(create_app(state))
+
+    listing = client.get("/api/avatars").json()
+    assert listing["avatars"][0]["id"] == "duplex_motion"
+    assert listing["avatars"][0]["valid"]
+
+    def select(avatar_id, mode):
+        payload = {} if avatar_id is None else {"avatar_id": avatar_id}
+        selected = client.post("/api/avatar/select", json=payload)
+        assert selected.status_code == 200, selected.text
+        assert client.get("/api/avatar").json()["avatar_mode"] == mode
+        return selected.json()["active_avatar_id"]
+
+    assert select(None, "duplex") == "duplex_motion"
+    controller = state.model.avatar_base_controller
+    controller.observe_model_mode("speak")
+    assert controller.next_frame(1, speech=True).variant_id == "speak-1"
+    assert select("knowledge_host_720p", "single") == "knowledge_host_720p"
+    assert state.model.avatar.avatar_id == "knowledge_host_720p"
+    assert select(None, "duplex") == "duplex_motion"
+    assert client.get("/api/avatar").json()["active_variant_id"] == "listen-1"

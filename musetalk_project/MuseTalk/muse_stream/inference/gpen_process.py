@@ -69,8 +69,14 @@ def _receive_message(connection: socket.socket, deadline: float):
 class _WorkerClient:
     """One in-flight request, with deadlines covering send and receive."""
 
-    def __init__(self, command: list[str], *, startup_timeout: float,
-                 request_timeout: float):
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        startup_timeout: float,
+        request_timeout: float,
+    ):
         self.request_timeout = request_timeout
         self._rpc_lock = threading.Lock()
         self._close_lock = threading.Lock()
@@ -83,7 +89,9 @@ class _WorkerClient:
             self._process = subprocess.Popen(
                 [*command, '--fd', str(child_connection.fileno()),
                  '--parent-pid', str(os.getpid())],
-                cwd=ROOT, pass_fds=(child_connection.fileno(),),
+                cwd=ROOT,
+                env=env,
+                pass_fds=(child_connection.fileno(),),
             )
             child_connection.close()
             message = _receive_message(
@@ -185,9 +193,21 @@ class GPENProcessRestorer(GPENFaceProcessor):
         self._metrics_lock = threading.Lock()
         self._metrics = dict(frames=0, total_ms=0., last_ms=0.,
                              rpc_total_ms=0., rpc_last_ms=0.)
+        gpen_python = os.environ.get(
+            "MUSETALK_GPEN_PYTHON",
+            str(ROOT.parent / "gpen-venv" / "bin" / "python"),
+        )
+        if not os.path.isfile(gpen_python):
+            gpen_python = sys.executable
+        worker_env = os.environ.copy()
+        gpen_bin = str(Path(gpen_python).parent)
+        worker_env["PATH"] = (
+            f"{gpen_bin}{os.pathsep}{worker_env.get('PATH', '')}"
+        )
         self._client = _WorkerClient(
-            [sys.executable, '-m', 'muse_stream.inference.gpen_process',
+            [gpen_python, '-m', 'muse_stream.inference.gpen_process',
              '--weights', str(path), '--device', self.device],
+            env=worker_env,
             startup_timeout=startup, request_timeout=timeout,
         )
         self.operators = self._client.worker_status['operators']

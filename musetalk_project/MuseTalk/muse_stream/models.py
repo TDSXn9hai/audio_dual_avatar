@@ -11,6 +11,7 @@ from typing import Any
 from .config import ROOT
 from .domain import Runtime
 from .log import log
+from .avatar_modes import AvatarBaseBundle
 
 
 _REQUIRED_CACHE_FILES = (
@@ -225,6 +226,62 @@ def load_cached_avatar(
     )
     from .inference.restoration import attach_avatar_restoration
     return attach_avatar_restoration(avatar, runtime, cache_dir)
+
+
+def build_avatar_bases(
+    args: Namespace,
+    runtime: Runtime,
+    base_configs: dict[str, tuple[Any, ...]],
+) -> dict[str, tuple[AvatarBaseBundle, ...]]:
+    """Load all configured listen/speak source bundles into memory."""
+    bundles: dict[str, tuple[AvatarBaseBundle, ...]] = {}
+    expected_size: tuple[int, int] | None = None
+    for base in ("listen", "speak"):
+        values: list[AvatarBaseBundle] = []
+        for config in base_configs.get(base, ()):
+            cache_dir = cache_dir_for(config.cache_id, args.version)
+            metadata_path = cache_dir / "avator_info.json"
+            if metadata_path.is_file():
+                with metadata_path.open("r", encoding="utf-8") as stream:
+                    metadata = json.load(stream)
+                cached_loop_mode = str(
+                    metadata.get("loop_mode", "pingpong")
+                ).lower()
+                if cached_loop_mode != config.loop_mode:
+                    raise RuntimeError(
+                        f"avatar cache loop_mode mismatch for "
+                        f"{config.variant_id}: "
+                        f"configured={config.loop_mode}, "
+                        f"cached={cached_loop_mode}"
+                    )
+            avatar = load_cached_avatar(args, runtime, config.cache_id)
+            cycle_length = len(avatar.frame_list_cycle)
+            frame_height, frame_width = avatar.frame_list_cycle[0].shape[:2]
+            current_size = (int(frame_width), int(frame_height))
+            if expected_size is None:
+                expected_size = current_size
+            elif current_size != expected_size:
+                raise RuntimeError(
+                    "avatar base dimensions must match: "
+                    f"expected={expected_size}, got={current_size} "
+                    f"for {config.variant_id}"
+                )
+            values.append(
+                AvatarBaseBundle(
+                    base=base,
+                    variant_id=config.variant_id,
+                    cycle_length=cycle_length,
+                    avatar=avatar,
+                )
+            )
+            log(
+                f"avatar base loaded: base={base} "
+                f"variant={config.variant_id} cache={config.cache_id} "
+                f"frames={cycle_length}"
+            )
+        if values:
+            bundles[base] = tuple(values)
+    return bundles
 
 
 def _configure_avatar_runtime(args: Namespace, runtime: Runtime) -> None:

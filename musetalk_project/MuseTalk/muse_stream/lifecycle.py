@@ -8,6 +8,7 @@ import traceback
 
 from .audio.ingest import DirectoryAudioIngestor
 from .log import log
+from .avatar_registry import install_duplex_avatar, is_duplex_avatar
 from .models import build_avatar, build_runtime
 from .state import AppState
 
@@ -56,11 +57,16 @@ def initialize(state: AppState) -> None:
             return
 
         state.service.status = "loading_avatar"
-        state.model.avatar = build_avatar(
-            args,
-            runtime,
-            state.model.avatar_id,
-        )
+        if is_duplex_avatar(state, state.model.avatar_id):
+            install_duplex_avatar(
+                state, state.model.avatar_id, increment_revision=False
+            )
+        else:
+            state.model.avatar = build_avatar(
+                args,
+                runtime,
+                state.model.avatar_id,
+            )
         if state.service.exit_requested:
             close_restorer(state)
             return

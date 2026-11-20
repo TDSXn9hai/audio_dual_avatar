@@ -136,20 +136,9 @@ class AvatarSessionService:
         if not isinstance(payload, dict):
             raise AvatarSessionError("JSON object required")
 
-        try:
-            default_preset_id = (
-                self.preset_registry.load().default_preset_id
-            )
-        except AvatarPresetError as exc:
-            raise AvatarSessionError(
-                str(exc),
-                status_code=exc.status_code,
-                code="avatar_preset_config_error",
-            ) from exc
-        preset_id = str(
-            payload.get("preset_id") or default_preset_id
-        ).strip()
-        if not preset_id:
+        requested_preset = payload.get("preset_id")
+        preset_id = str(requested_preset or "").strip()
+        if requested_preset and not preset_id:
             raise AvatarSessionError(
                 "preset_id is required",
                 code="invalid_preset",
@@ -198,6 +187,10 @@ class AvatarSessionService:
 
             avatar_status = await self._fetch_avatar_status()
             try:
+                if not preset_id:
+                    preset_id = await asyncio.to_thread(
+                        self.preset_registry.default_preset_for, avatar_status
+                    )
                 item = await asyncio.to_thread(
                     self.preset_registry.public_item,
                     preset_id,

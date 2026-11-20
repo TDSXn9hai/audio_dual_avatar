@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from ..audio.segments import SegmentManager
+from ..avatar_modes import AvatarBaseSnapshot
 from ..domain import LiveSegment
 from ..log import log
 from ..protocol import (
@@ -130,21 +131,39 @@ def live_infer_worker(
     segments = SegmentManager(state)
     pipeline = InferencePipeline(state)
     next_frame = 0
-    pending_extra: dict[int, tuple[str, np.ndarray]] = {}
+    controller = state.model.avatar_base_controller
+    if controller is not None:
+        controller.rewind(0)
+    pending_extra: dict[int, tuple[str, np.ndarray, AvatarBaseSnapshot | None]] = {}
     # Last segment that finished generating while an answer is still open.
     # Underruns inside an answer repeat its last frame instead of cutting to
     # the source video; between answers and during interrupts use idle frames.
     last_media: LiveSegment | None = None
+    last_snapshot: AvatarBaseSnapshot | None = None
     hold_run = 0
 
     def emit_idle_frame() -> bool:
         nonlocal next_frame
+        snapshot = (
+            controller.next_idle_frame(next_frame)
+            if controller is not None
+            else None
+        )
+        source_avatar = (
+            snapshot.bundle.avatar
+            if snapshot is not None
+            else avatar
+        )
         with state.pipeline.lock:
             source_epoch = state.pipeline.flush_seq
             source_revision = state.model.avatar_revision
-        frame = avatar.frame_list_cycle[
-            next_frame % len(avatar.frame_list_cycle)
-        ]
+        cycle = source_avatar.frame_list_cycle
+        source_index = (
+            snapshot.source_frame(next_frame)
+            if snapshot is not None
+            else next_frame % len(cycle)
+        )
+        frame = cycle[source_index]
         if not put_blocking(
             raw_queue,
             loop,
@@ -157,6 +176,7 @@ def live_infer_worker(
                 frame,
                 source_epoch,
                 source_revision,
+                snapshot,
             ),
             stop,
         ):
@@ -177,6 +197,11 @@ def live_infer_worker(
             with state.pipeline.lock:
                 source_epoch = state.pipeline.flush_seq
                 source_revision = state.model.avatar_revision
+            held_snapshot = (
+                controller.hold_frame(next_frame)
+                if controller is not None
+                else last_snapshot
+            )
             if not put_blocking(
                 raw_queue,
                 loop,
@@ -189,6 +214,7 @@ def live_infer_worker(
                     None,
                     source_epoch,
                     source_revision,
+                    held_snapshot,
                 ),
                 stop,
             ):
@@ -221,7 +247,11 @@ def live_infer_worker(
                     state.interrupt.reset_frame = -1
             if reset_frame >= 0:
                 last_media = None
+                last_snapshot = None
                 hold_run = 0
+                pending_extra.clear()
+                if controller is not None:
+                    controller.rewind(reset_frame)
             if reset_frame >= 0 and reset_frame != next_frame:
                 next_frame = reset_frame
 
@@ -284,6 +314,18 @@ def live_infer_worker(
                 segment_epoch = state.pipeline.flush_seq
                 segment_revision = state.model.avatar_revision
             try:
+                frame_bases = None
+                if controller is not None:
+                    mask = segment.speech_mask
+                    frame_bases = [
+                        controller.next_frame(
+                            next_frame + offset,
+                            speech=mask is None or (offset < len(mask) and bool(mask[offset])),
+                        )
+                        for offset in range(segment.total_frames)
+                    ]
+                    # Overlap is speculative. It must not advance the controller.
+                    frame_bases.extend([frame_bases[-1]] * segment.extra_frames)
                 if not put_blocking(
                     raw_queue, loop, ("segment", segment), stop
                 ):
@@ -295,9 +337,7 @@ def live_infer_worker(
                     f"start_pts="
                     f"{frame_pts_us(segment.global_start_frame, state.model.fps)}us"
                 )
-                for frame_kind, frame_index, frame in pipeline.iter_segment(
-                    segment
-                ):
+                for frame_kind, frame_index, frame in pipeline.iter_segment(segment, frame_bases):
                     if segment.id in state.pipeline.canceled_ids or (
                         state.interrupt.active and segment.priority != 0
                     ):
@@ -306,6 +346,11 @@ def live_infer_worker(
                         pending_extra.clear()
                         log(f"cancelled generation of segment {segment.id}")
                         break
+                    snapshot = (
+                        frame_bases[frame_index - segment.global_start_frame]
+                        if frame_bases is not None
+                        else segment.base_snapshot
+                    )
                     core_end = (
                         segment.global_start_frame
                         + segment.total_frames
@@ -314,6 +359,7 @@ def live_infer_worker(
                         pending_extra[frame_index] = (
                             frame_kind,
                             frame,
+                            snapshot,
                         )
                         continue
                     emit_frame = frame
@@ -322,12 +368,13 @@ def live_infer_worker(
                         < segment.global_start_frame + overlap
                         and frame_index in pending_extra
                     ):
-                        previous_kind, previous_frame = (
+                        previous_kind, previous_frame, previous_snapshot = (
                             pending_extra.pop(frame_index)
                         )
                         if (
                             previous_kind == "generated"
                             and frame_kind == "generated"
+                            and previous_snapshot is snapshot
                         ):
                             alpha = (
                                 frame_index
@@ -355,6 +402,7 @@ def live_infer_worker(
                             emit_frame,
                             segment_epoch,
                             segment_revision,
+                            snapshot,
                         ),
                         stop,
                     ):
@@ -364,6 +412,7 @@ def live_infer_worker(
                     else:
                         state.pipeline.silent_frames += 1
                     next_frame = max(next_frame, frame_index + 1)
+                    last_snapshot = snapshot
                 if not canceled:
                     if not put_blocking(
                         raw_queue, loop, ("segment_end", segment.id), stop
@@ -424,6 +473,7 @@ def live_prepare_worker(
             with state.pipeline.lock:
                 epoch = int(extra[0]) if extra else state.pipeline.flush_seq
                 revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+                snapshot = extra[2] if len(extra) > 2 else None
                 stale = (
                     segment_id in state.pipeline.canceled_ids
                     or epoch != state.pipeline.flush_seq
@@ -433,8 +483,17 @@ def live_prepare_worker(
                 continue
             if frame_kind == FRAME_GENERATED:
                 pipeline._dump_generated_raw(frame_index, frame)
-                frame, original, inverse = pipeline.prepare_restoration(
-                    frame_index, frame)
+                if snapshot is None:
+                    frame, original, inverse = pipeline.prepare_restoration(
+                        frame_index,
+                        frame,
+                    )
+                else:
+                    frame, original, inverse = pipeline.prepare_restoration(
+                        frame_index,
+                        frame,
+                        snapshot,
+                    )
                 count += 1
             else:
                 original, inverse = None, None
@@ -446,11 +505,35 @@ def live_prepare_worker(
                 )
             if stale:
                 continue
-            if not put_blocking(
-                restored_queue, loop,
-                ("raw", frame_kind, segment_id, pts_us, frame_index,
-                 frame, epoch, revision, original, inverse), stop,
-            ):
+            prepared_item = (
+                (
+                    "raw",
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    frame,
+                    epoch,
+                    revision,
+                    snapshot,
+                    original,
+                    inverse,
+                )
+                if snapshot is not None
+                else (
+                    "raw",
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    frame,
+                    epoch,
+                    revision,
+                    original,
+                    inverse,
+                )
+            )
+            if not put_blocking(restored_queue, loop, prepared_item, stop):
                 return
     except Exception:
         log(traceback.format_exc())
@@ -481,7 +564,34 @@ def live_gpen_worker(
                 continue
             if item[0] != "raw":
                 continue
-            _, kind, segment_id, pts_us, frame_index, frame, epoch, revision, original, inverse = item
+            if len(item) >= 11:
+                (
+                    _,
+                    kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    frame,
+                    epoch,
+                    revision,
+                    snapshot,
+                    original,
+                    inverse,
+                ) = item
+            else:
+                (
+                    _,
+                    kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    frame,
+                    epoch,
+                    revision,
+                    original,
+                    inverse,
+                ) = item
+                snapshot = None
             with state.pipeline.lock:
                 if (segment_id in state.pipeline.canceled_ids
                     or epoch != state.pipeline.flush_seq
@@ -497,7 +607,7 @@ def live_gpen_worker(
             if not put_blocking(
                 restored_queue, loop,
                 ("raw", kind, segment_id, pts_us, frame_index, frame,
-                 epoch, revision, original, inverse), stop):
+                 epoch, revision, snapshot, original, inverse), stop):
                 return
     except Exception:
         log(traceback.format_exc())
@@ -525,23 +635,47 @@ def live_restoration_worker(
             _, kind, segment_id, pts_us, index, frame, *extra = item
             epoch = int(extra[0]) if extra else state.pipeline.flush_seq
             revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
+            snapshot = extra[2] if len(extra) >= 3 else None
             with state.pipeline.lock:
                 if (segment_id in state.pipeline.canceled_ids
                     or epoch != state.pipeline.flush_seq
                     or revision != state.model.avatar_revision):
                     continue
             if kind == FRAME_GENERATED:
-                frame = pipeline.restore_frame(index, frame)
+                if snapshot is None:
+                    frame = pipeline.restore_frame(index, frame)
+                else:
+                    frame = pipeline.restore_frame(index, frame, snapshot)
             with state.pipeline.lock:
                 if (segment_id in state.pipeline.canceled_ids
                     or epoch != state.pipeline.flush_seq
                     or revision != state.model.avatar_revision):
                     continue
-            if not put_blocking(
-                restored_queue, loop,
-                ("raw", kind, segment_id, pts_us, index, frame, epoch, revision),
-                stop,
-            ):
+            restored_item = (
+                (
+                    "raw",
+                    kind,
+                    segment_id,
+                    pts_us,
+                    index,
+                    frame,
+                    epoch,
+                    revision,
+                    snapshot,
+                )
+                if snapshot is not None
+                else (
+                    "raw",
+                    kind,
+                    segment_id,
+                    pts_us,
+                    index,
+                    frame,
+                    epoch,
+                    revision,
+                )
+            )
+            if not put_blocking(restored_queue, loop, restored_item, stop):
                 return
     except Exception:
         put_blocking(restored_queue, loop, ("error", traceback.format_exc()), stop)
@@ -587,8 +721,14 @@ def live_fusion_worker(
 
             _, frame_kind, segment_id, pts_us, frame_index, frame, *extra = item
             original = inverse = None
-            if frames_restored and len(extra) >= 4:
-                source_flush_seq, source_revision, original, inverse = extra[:4]
+            snapshot = (
+                extra[2]
+                if (len(extra) >= 5 if frames_restored else len(extra) >= 3)
+                else None
+            )
+            if frames_restored and len(extra) >= 5:
+                source_flush_seq, source_revision = extra[:2]
+                original, inverse = extra[3:5]
             else:
                 source_flush_seq = int(extra[0]) if extra else state.pipeline.flush_seq
                 source_revision = int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
@@ -611,19 +751,77 @@ def live_fusion_worker(
                     if frames_restored:
                         if original is not None:
                             if direct_bbox:
-                                restored_crop = pipeline.finalize_restoration_to_bbox(
-                                    frame_index, frame, original, inverse)
-                                prepared = pipeline.composite_frame(
-                                    frame_index, restored_crop, already_bbox=True)
+                                if snapshot is None:
+                                    restored_crop = (
+                                        pipeline.finalize_restoration_to_bbox(
+                                            frame_index,
+                                            frame,
+                                            original,
+                                            inverse,
+                                        )
+                                    )
+                                    prepared = pipeline.composite_frame(
+                                        frame_index,
+                                        restored_crop,
+                                        already_bbox=True,
+                                    )
+                                else:
+                                    restored_crop = (
+                                        pipeline.finalize_restoration_to_bbox(
+                                            frame_index,
+                                            frame,
+                                            original,
+                                            inverse,
+                                            snapshot,
+                                        )
+                                    )
+                                    prepared = pipeline.composite_frame(
+                                        frame_index,
+                                        restored_crop,
+                                        already_bbox=True,
+                                        snapshot=snapshot,
+                                    )
                             else:
                                 restored_crop = pipeline.finalize_restoration(
-                                    frame, original, inverse)
-                                prepared = pipeline.composite_frame(
-                                    frame_index, restored_crop)
+                                    frame,
+                                    original,
+                                    inverse,
+                                )
+                                if snapshot is None:
+                                    prepared = pipeline.composite_frame(
+                                        frame_index,
+                                        restored_crop,
+                                    )
+                                else:
+                                    prepared = pipeline.composite_frame(
+                                        frame_index,
+                                        restored_crop,
+                                        snapshot=snapshot,
+                                    )
                         else:
-                            prepared = pipeline.composite_frame(frame_index, frame)
+                            if snapshot is None:
+                                prepared = pipeline.composite_frame(
+                                    frame_index,
+                                    frame,
+                                )
+                            else:
+                                prepared = pipeline.composite_frame(
+                                    frame_index,
+                                    frame,
+                                    snapshot=snapshot,
+                                )
                     else:
-                        prepared = pipeline.blend_frame(frame_index, frame)
+                        if snapshot is None:
+                            prepared = pipeline.blend_frame(
+                                frame_index,
+                                frame,
+                            )
+                        else:
+                            prepared = pipeline.blend_frame(
+                                frame_index,
+                                frame,
+                                snapshot,
+                            )
                     total_ms += (time.perf_counter() - started) * 1000
                     generated_count += 1
                 else:
@@ -639,9 +837,7 @@ def live_fusion_worker(
             if canceled:
                 continue
 
-            if not put_blocking(
-                fused_queue,
-                loop,
+            fused_item = (
                 (
                     "raw",
                     frame_kind,
@@ -651,9 +847,21 @@ def live_fusion_worker(
                     prepared,
                     source_flush_seq,
                     source_revision,
-                ),
-                stop,
-            ):
+                    snapshot,
+                )
+                if snapshot is not None
+                else (
+                    "raw",
+                    frame_kind,
+                    segment_id,
+                    pts_us,
+                    frame_index,
+                    prepared,
+                    source_flush_seq,
+                    source_revision,
+                )
+            )
+            if not put_blocking(fused_queue, loop, fused_item, stop):
                 return
             count += 1
             if count % 500 == 0:
@@ -965,6 +1173,7 @@ def live_encode_worker(
             source_revision = (
                 int(extra[1]) if len(extra) > 1 else state.model.avatar_revision
             )
+            snapshot = extra[2] if len(extra) > 2 else None
             if use_h264 and source_flush_seq != encoder_flush_seq:
                 continue
             if source_revision != state.model.avatar_revision:
@@ -974,9 +1183,15 @@ def live_encode_worker(
                 if use_h264:
                     fallback = last_composite
                     if fallback is None:
-                        cycle = state.model.avatar.frame_list_cycle
+                        source_avatar = (
+                            snapshot.bundle.avatar
+                            if snapshot is not None
+                            else state.model.avatar
+                        )
+                        cycle = source_avatar.frame_list_cycle
                         fallback = resize_for_stream(
-                            cycle[frame_index % len(cycle)],
+                            cycle[snapshot.source_frame(frame_index) if snapshot is not None
+                                  else frame_index % len(cycle)],
                             stream_width,
                         )
                     assert h264_encoder is not None
@@ -984,9 +1199,15 @@ def live_encode_worker(
                 else:
                     # Repeat the whole image composite: re-blending the old
                     # face onto a newer background frame would misalign it.
-                    cycle = state.model.avatar.frame_list_cycle
+                    source_avatar = (
+                        snapshot.bundle.avatar
+                        if snapshot is not None
+                        else state.model.avatar
+                    )
+                    cycle = source_avatar.frame_list_cycle
                     fallback = resize_for_stream(
-                        cycle[frame_index % len(cycle)],
+                        cycle[snapshot.source_frame(frame_index) if snapshot is not None
+                              else frame_index % len(cycle)],
                         stream_width,
                     )
                     future = None
@@ -1003,7 +1224,11 @@ def live_encode_worker(
                     return
             else:
                 if frame_kind == FRAME_GENERATED and not frames_prepared:
-                    combined = pipeline.blend_frame(frame_index, frame)
+                    combined = pipeline.blend_frame(
+                        frame_index,
+                        frame,
+                        snapshot,
+                    )
                 else:
                     combined = frame
                 with state.pipeline.lock:
