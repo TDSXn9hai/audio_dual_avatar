@@ -176,6 +176,16 @@ class DuplexSectionConfig(BaseModel):
         default=60.0,
         description="Duplex 暂停超时（秒），超时后释放 Worker",
     )
+    avatar_length_penalty: float = Field(
+        default=1.1,
+        ge=0.5,
+        le=2.0,
+        description=(
+            "/avatar 与 /avatar-v2 数字人会话的 length_penalty（压低 turn_eos，"
+            ">1.0 回答更长、更不容易被插话打断）。只在 gateway 启动时读取，"
+            "不在页面上暴露。"
+        ),
+    )
 
 
 # ============ 顶层配置 ============
@@ -280,6 +290,10 @@ class ServiceConfig(BaseModel):
         return self.duplex.pause_timeout
 
     @property
+    def avatar_length_penalty(self) -> float:
+        return self.duplex.avatar_length_penalty
+
+    @property
     def playback_delay_ms(self) -> int:
         return self.audio.playback_delay_ms
 
@@ -339,7 +353,8 @@ def load_config(path: str = _CONFIG_PATH) -> ServiceConfig:
         f"attn_implementation={config.attn_implementation}, "
         f"gateway_port={config.gateway_port}, "
         f"playback_delay_ms={config.playback_delay_ms}, "
-        f"chat_vocoder={config.chat_vocoder}"
+        f"chat_vocoder={config.chat_vocoder}, "
+        f"avatar_length_penalty={config.avatar_length_penalty}"
     )
     return config
 

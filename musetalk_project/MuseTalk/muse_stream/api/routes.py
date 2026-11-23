@@ -42,24 +42,14 @@ def _avatar_base_metadata(state: AppState) -> dict[str, Any]:
             "active_base": "listen",
             "active_variant_id": state.model.avatar_id,
             "pending_base": None,
-            "pending_variant_id": None,
         }
 
     snapshot = controller.snapshot_for_segment()
-    active_base = snapshot.base
-    active_variant_id = snapshot.variant_id
-    pending_base = controller.pending_base
-    pending_variant_id = None
-    if pending_base:
-        variants = state.model.avatar_base_bundles.get(pending_base, ())
-        if variants:
-            pending_variant_id = variants[0].variant_id
     return {
         "avatar_mode": "duplex",
-        "active_base": active_base,
-        "active_variant_id": active_variant_id,
-        "pending_base": pending_base,
-        "pending_variant_id": pending_variant_id,
+        "active_base": snapshot.base,
+        "active_variant_id": snapshot.variant_id,
+        "pending_base": controller.pending_base,
     }
 
 

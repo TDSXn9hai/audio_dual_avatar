@@ -25,6 +25,7 @@
         "eta_ema_min_samples": 3
     },
     "duplex": {
-        "pause_timeout": 60.0
+        "pause_timeout": 60.0,
+        "avatar_length_penalty": 1.05
     }
 }

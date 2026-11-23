@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -14,7 +15,9 @@ from muse_stream.avatar_registry import (
     AvatarBusyError,
     AvatarActivationError,
     AvatarCacheInfo,
+    AvatarInvalidError,
     activate_avatar,
+    ensure_avatar_base_caches,
     inspect_avatar_cache,
     list_avatar_caches,
 )
@@ -314,6 +317,9 @@ def test_duplex_preset_can_switch_to_knowledge_and_back(monkeypatch, tmp_path) -
     monkeypatch.setattr("muse_stream.avatar_registry.load_cached_avatar", load)
     monkeypatch.setattr("muse_stream.models.load_cached_avatar", load)
     monkeypatch.setattr("muse_stream.models.cache_dir_for", lambda avatar_id, version: tmp_path / avatar_id)
+    monkeypatch.setattr("muse_stream.avatar_registry.cache_dir_for", lambda avatar_id, version: tmp_path / avatar_id)
+    for cache_id in ("duplex_listen_1", "duplex_speak_1"):
+        _write_cache_info(tmp_path / cache_id, cache_id)
     monkeypatch.setattr("muse_stream.api.routes.list_avatar_caches", lambda *args: [])
     client = TestClient(create_app(state))
 
@@ -336,3 +342,92 @@ def test_duplex_preset_can_switch_to_knowledge_and_back(monkeypatch, tmp_path) -
     assert state.model.avatar.avatar_id == "knowledge_host_720p"
     assert select(None, "duplex") == "duplex_motion"
     assert client.get("/api/avatar").json()["active_variant_id"] == "listen-1"
+
+
+def _base_state(tmp_path, preparation: str, count: int = 3) -> AppState:
+    state = _state()
+    state.model.default_avatar_id = "duplex_motion"
+    state.model.avatar_base_configs = {
+        base: tuple(
+            AvatarVariantConfig(
+                base,
+                f"{base}-{index}",
+                f"duplex_{base}_{index}",
+                video_path=f"data/video/duplex_{base}_{index}.mp4",
+                preparation=preparation,
+                loop_mode="forward",
+            )
+            for index in range(1, count + 1)
+        )
+        for base in ("listen", "speak")
+    }
+    return state
+
+
+def _write_cache_info(cache_dir, cache_id: str, loop_mode: str = "forward") -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "avator_info.json").write_text(
+        json.dumps({
+            "avatar_id": cache_id,
+            "video_path": f"data/video/{cache_id}.mp4",
+            "bbox_shift": 0,
+            "version": "v15",
+            "loop_mode": loop_mode,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_ensure_base_caches_generates_only_unusable_variants(
+    monkeypatch, tmp_path
+) -> None:
+    state = _base_state(tmp_path, "auto")
+    ready = {"duplex_listen_1", "duplex_speak_2"}
+    # A cache with the wrong loop_mode must be regenerated too.
+    _write_cache_info(tmp_path / "duplex_listen_1", "duplex_listen_1")
+    _write_cache_info(tmp_path / "duplex_speak_2", "duplex_speak_2")
+    _write_cache_info(tmp_path / "duplex_speak_3", "duplex_speak_3", "pingpong")
+    ready.add("duplex_speak_3")
+    prepared: list[str] = []
+
+    def inspect(cache_id, version):
+        return AvatarCacheInfo(cache_id, cache_id in ready, 8, 12, 10, 10,
+                               None if cache_id in ready else "missing")
+
+    def prepare(args, runtime, variant):
+        prepared.append(variant.cache_id)
+        ready.add(variant.cache_id)
+        _write_cache_info(tmp_path / variant.cache_id, variant.cache_id)
+
+    monkeypatch.setattr("muse_stream.avatar_registry.inspect_avatar_cache", inspect)
+    monkeypatch.setattr("muse_stream.avatar_registry.prepare_avatar_base", prepare)
+    monkeypatch.setattr(
+        "muse_stream.avatar_registry.cache_dir_for",
+        lambda avatar_id, version: tmp_path / avatar_id,
+    )
+
+    ensure_avatar_base_caches(state)
+    assert prepared == [
+        "duplex_listen_2", "duplex_listen_3", "duplex_speak_1", "duplex_speak_3",
+    ]
+
+    prepared.clear()
+    ensure_avatar_base_caches(state)
+    assert prepared == []
+
+
+def test_ensure_base_caches_rejects_missing_reuse_variant(
+    monkeypatch, tmp_path
+) -> None:
+    state = _base_state(tmp_path, "reuse", count=1)
+    monkeypatch.setattr(
+        "muse_stream.avatar_registry.inspect_avatar_cache",
+        lambda cache_id, version: AvatarCacheInfo(cache_id, False, error="missing"),
+    )
+    monkeypatch.setattr(
+        "muse_stream.avatar_registry.prepare_avatar_base",
+        lambda *args: pytest.fail("reuse variants must not be generated"),
+    )
+
+    with pytest.raises(AvatarInvalidError, match="listen-1"):
+        ensure_avatar_base_caches(state)

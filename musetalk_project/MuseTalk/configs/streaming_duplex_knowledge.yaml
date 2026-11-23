@@ -26,28 +26,32 @@ avatar:
   parsing_mode: jaw
   left_cheek_width: 90
   right_cheek_width: 90
+  # Each state accepts any number of base videos; append entries to extend.
+  # On activation every entry's cache (results/v15/avatars/<cache_id>) is
+  # validated. preparation: auto regenerates a missing/invalid cache from
+  # video_path; reuse fails instead. cache_id must match [A-Za-z0-9_-]+.
   bases:
     listen:
       - id: listen-1
         cache_id: duplex_listen_1
         video_path: data/video/duplex_listen_1.mp4
-        preparation: reuse
+        preparation: auto
         loop_mode: forward
       - id: listen-2
         cache_id: duplex_listen_2
         video_path: data/video/duplex_listen_2.mp4
-        preparation: reuse
+        preparation: auto
         loop_mode: forward
     speak:
       - id: speak-1
         cache_id: duplex_speak_1
         video_path: data/video/duplex_speak_1.mp4
-        preparation: reuse
+        preparation: auto
         loop_mode: forward
       - id: speak-2
         cache_id: duplex_speak_2
         video_path: data/video/duplex_speak_2.mp4
-        preparation: reuse
+        preparation: auto
         loop_mode: forward
 
 inference:

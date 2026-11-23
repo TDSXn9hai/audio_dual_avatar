@@ -1,4 +1,5 @@
 import asyncio
+import random
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,7 +18,14 @@ from muse_stream.state import AppState
 from scripts.realtime_inference import build_loop
 
 
-def make_controller():
+class FirstChoice:
+    """Deterministic stand-in for random.Random: always picks the first candidate."""
+
+    def choice(self, values):
+        return values[0]
+
+
+def make_controller(rng=None):
     return AvatarBaseController(
         [
             AvatarBaseBundle(
@@ -42,6 +50,7 @@ def make_controller():
             ),
         ],
         initial_base="listen",
+        rng=rng or FirstChoice(),
     )
 
 
@@ -100,7 +109,36 @@ def test_latest_target_wins_before_boundary():
     snapshot = controller.next_idle_frame(4)
 
     assert snapshot.base == "listen"
-    assert snapshot.revision == 1
+    assert snapshot.variant_id == "listen-2"
+
+
+def test_same_state_draws_a_different_clip_at_each_boundary():
+    controller = make_controller(rng=random.Random(7))
+    played = [controller.next_idle_frame(0).variant_id]
+    for frame in range(1, 4 * 50):
+        snapshot = controller.next_idle_frame(frame)
+        if snapshot.source_frame(frame) == 0:
+            played.append(snapshot.variant_id)
+    assert len(played) == 50
+    assert all(a != b for a, b in zip(played, played[1:]))
+
+
+def test_random_draw_covers_the_whole_pool_without_repeating():
+    bundles = [AvatarBaseBundle("listen", f"listen-{i}", 2) for i in range(5)]
+    controller = AvatarBaseController(bundles, rng=random.Random(3))
+    played = []
+    for frame in range(0, 2 * 200, 2):
+        played.append(controller.next_idle_frame(frame).variant_id)
+    assert set(played) == {item.variant_id for item in bundles}
+    assert all(a != b for a, b in zip(played, played[1:]))
+
+
+def test_single_clip_pool_keeps_looping_without_new_revisions():
+    controller = AvatarBaseController(
+        [AvatarBaseBundle("listen", "listen-1", 4)], rng=random.Random(0)
+    )
+    assert controller.next_idle_frame(8).revision == 1
+    assert controller.next_idle_frame(8).source_frame(8) == 0
 
 
 def test_switching_back_uses_next_variant_of_target_base():

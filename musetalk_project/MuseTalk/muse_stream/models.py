@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import time
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -226,6 +229,93 @@ def load_cached_avatar(
     )
     from .inference.restoration import attach_avatar_restoration
     return attach_avatar_restoration(avatar, runtime, cache_dir)
+
+
+def resolve_source_path(video_path: str) -> Path:
+    path = Path(video_path)
+    return path if path.is_absolute() else ROOT / path
+
+
+def prepare_avatar_base(args: Namespace, runtime: Runtime, config: Any) -> Path:
+    """Build one configured base cache in a staging dir, then swap it in.
+
+    An existing (invalid) cache is renamed aside instead of being deleted.
+    """
+    if not config.video_path:
+        raise RuntimeError(
+            f"avatar base {config.variant_id} has no video_path to prepare from"
+        )
+    source = resolve_source_path(config.video_path)
+    if not source.exists():
+        raise FileNotFoundError(
+            f"avatar base {config.variant_id} source not found: {source}"
+        )
+
+    cache_dir = cache_dir_for(config.cache_id, args.version)
+    staging = cache_dir.with_name(f"{cache_dir.name}.preparing")
+    if staging.exists():
+        # Leftover of an interrupted preparation; only this function writes it.
+        shutil.rmtree(staging)
+
+    _configure_avatar_runtime(args, runtime)
+    import scripts.realtime_inference as rt
+
+    log(
+        f"preparing avatar base: variant={config.variant_id} "
+        f"cache={cache_dir.name} source={config.video_path} "
+        f"loop_mode={config.loop_mode}"
+    )
+    avatar = rt.Avatar(
+        avatar_id=staging.name,
+        video_path=str(source),
+        bbox_shift=0 if args.version == "v15" else int(args.bbox_shift),
+        batch_size=args.batch_size,
+        preparation=True,
+        loop_mode=config.loop_mode,
+    )
+    del avatar
+
+    info_path = staging / "avator_info.json"
+    with info_path.open("r", encoding="utf-8") as stream:
+        info = json.load(stream)
+    info["avatar_id"] = cache_dir.name
+    info["video_path"] = config.video_path
+    with info_path.open("w", encoding="utf-8") as stream:
+        json.dump(info, stream)
+
+    if getattr(runtime, "face_restorer", None) is not None:
+        _prepare_gpen_alignment(staging.name, args.version)
+
+    if cache_dir.exists():
+        backup = cache_dir.with_name(
+            f"{cache_dir.name}.invalid-{time.strftime('%Y%m%d%H%M%S')}"
+        )
+        cache_dir.rename(backup)
+        log(f"previous avatar base cache moved to {backup}")
+    staging.rename(cache_dir)
+    log(f"avatar base prepared: {cache_dir}")
+    return cache_dir
+
+
+def _prepare_gpen_alignment(cache_name: str, version: str) -> None:
+    if version != "v15":
+        raise RuntimeError("GPEN alignment preparation requires the v15 cache")
+    python = os.environ.get(
+        "GPEN_ALIGNMENT_PYTHON",
+        str(ROOT.parent / "gpen-venv" / "bin" / "python"),
+    )
+    if not Path(python).is_file():
+        raise FileNotFoundError(
+            f"missing GPEN alignment Python: {python} (set GPEN_ALIGNMENT_PYTHON)"
+        )
+    script = ROOT / "muse_stream" / "inference" / "gpen" / "prepare_alignment.py"
+    device = os.environ.get("MUSETALK_GPEN_DEVICE", "cuda:0")
+    log(f"preparing GPEN alignment: {cache_name} (python={python})")
+    subprocess.run(
+        [python, str(script), "--avatars", cache_name, "--device", device],
+        cwd=str(ROOT),
+        check=True,
+    )
 
 
 def build_avatar_bases(

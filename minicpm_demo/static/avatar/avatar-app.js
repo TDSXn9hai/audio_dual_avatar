@@ -817,7 +817,7 @@ async function start() {
         await owner.start(
             prompt,
             {
-                config: { length_penalty: 1.1 },
+                config: { length_penalty: activation.session_config?.length_penalty ?? 1.1 },
                 use_tts: true,
                 ref_audio_base64: voiceRef.base64,
                 tts_ref_audio_base64: voiceRef.base64,

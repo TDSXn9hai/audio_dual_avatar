@@ -110,6 +110,16 @@ def parse_avatar_base_configs(
                     f"avatar.bases.{base}[{index}].loop_mode must be "
                     "pingpong or forward"
                 )
+            if values[-1].preparation not in ("auto", "reuse"):
+                raise ValueError(
+                    f"avatar.bases.{base}[{index}].preparation must be "
+                    "auto or reuse"
+                )
+            if values[-1].preparation == "auto" and not values[-1].video_path:
+                raise ValueError(
+                    f"avatar.bases.{base}[{index}] with preparation=auto "
+                    "requires video_path"
+                )
         parsed[base] = tuple(values)
     if not parsed["listen"]:
         raise ValueError("avatar.bases.listen requires at least one variant")

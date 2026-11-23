@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import random
 import threading
 from typing import Iterable
 
@@ -41,13 +42,23 @@ class AvatarBaseSnapshot:
 
 
 class AvatarBaseController:
-    """Apply requested base changes only at complete source-cycle boundaries."""
+    """Apply base changes only at complete source-cycle boundaries.
+
+    At every boundary the next clip is drawn at random from the target base's
+    pool, so a state does not keep looping one short clip. The clip that just
+    played (or last played in that base) is excluded when the pool allows it.
+    """
+
+    # Bounded so a long session does not grow the switch history forever;
+    # rewinds only ever reach back a few seconds of unplayed frames.
+    _MAX_HISTORY = 512
 
     def __init__(
         self,
         bundles: Iterable[AvatarBaseBundle],
         *,
         initial_base: str = "listen",
+        rng: random.Random | None = None,
     ) -> None:
         values = tuple(bundles)
         if not values:
@@ -60,9 +71,8 @@ class AvatarBaseController:
         if not self._by_base.get(initial_base):
             raise ValueError(f"no avatar bundle configured for {initial_base}")
         self._lock = threading.RLock()
-        self._variant_indices = {"listen": -1, "speak": -1}
+        self._rng = rng or random.Random()
         self._active = self._by_base[initial_base][0]
-        self._variant_indices[initial_base] = 0
         self._model_mode = initial_base
         self._revision = 1
         self._history = [(0, self._snapshot(0))]
@@ -104,15 +114,21 @@ class AvatarBaseController:
             raise ValueError("frame_index must be non-negative")
         with self._lock:
             current = self._history[-1][1]
+            if not (
+                frame_index > current.start_frame
+                and current.source_frame(frame_index) == 0
+            ):
+                return current
             target = self._model_mode
             if (
                 target != current.base
                 and self._by_base[target]
                 and (target != "speak" or speech)
-                and frame_index > current.start_frame
-                and current.source_frame(frame_index) == 0
             ):
                 self._activate(target, frame_index)
+            elif len(self._by_base[current.base]) > 1:
+                # Staying in the same state: move to another clip of the pool.
+                self._activate(current.base, frame_index)
             return self._history[-1][1]
 
     def hold_frame(self, frame_index: int) -> AvatarBaseSnapshot:
@@ -121,17 +137,14 @@ class AvatarBaseController:
             current = self._history[-1][1]
             held = replace(current, start_frame=current.start_frame + 1)
             self._history.append((frame_index, held))
+            self._trim_history()
             return held
 
     def rewind(self, next_frame: int) -> None:
         """Discard switches and holds in frames removed by a playback reset."""
         with self._lock:
             while len(self._history) > 1 and self._history[-1][0] >= next_frame:
-                _, dropped = self._history.pop()
-                if dropped.revision != self._history[-1][1].revision:
-                    self._variant_indices[dropped.base] = (
-                        self._variant_indices[dropped.base] - 1
-                    ) % len(self._by_base[dropped.base])
+                self._history.pop()
             self._active = self._history[-1][1].bundle
 
     def _snapshot(self, start_frame: int) -> AvatarBaseSnapshot:
@@ -144,10 +157,21 @@ class AvatarBaseController:
             start_frame=start_frame,
         )
 
+    def _last_played(self, base: str) -> AvatarBaseBundle | None:
+        for _, snapshot in reversed(self._history):
+            if snapshot.base == base:
+                return snapshot.bundle
+        return None
+
     def _activate(self, base: str, frame_index: int) -> None:
         variants = self._by_base[base]
-        next_index = (self._variant_indices[base] + 1) % len(variants)
-        self._variant_indices[base] = next_index
-        self._active = variants[next_index]
+        last = self._last_played(base)
+        candidates = [item for item in variants if item is not last] or list(variants)
+        self._active = self._rng.choice(candidates)
         self._revision += 1
         self._history.append((frame_index, self._snapshot(frame_index)))
+        self._trim_history()
+
+    def _trim_history(self) -> None:
+        if len(self._history) > self._MAX_HISTORY:
+            del self._history[: len(self._history) - self._MAX_HISTORY]

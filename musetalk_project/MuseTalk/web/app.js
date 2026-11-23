@@ -150,6 +150,7 @@ async function refreshStatus() {
       const labels = {
         starting: "启动中",
         loading_models: "加载模型",
+        preparing_avatar: "生成数字人底板缓存",
         loading_avatar: "加载数字人",
       };
       setStatus(labels[data.status] || data.status, "warn");

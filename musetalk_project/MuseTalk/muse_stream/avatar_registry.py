@@ -8,6 +8,7 @@ import json
 import pickle
 import queue
 import re
+import threading
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,19 @@ from typing import Any
 from .avatar_modes import AvatarBaseController
 from .config import ROOT
 from .log import log
-from .models import build_avatar_bases, cache_dir_for, load_cached_avatar
+from .models import (
+    build_avatar_bases,
+    cache_dir_for,
+    load_cached_avatar,
+    prepare_avatar_base,
+    resolve_source_path,
+)
 from .state import AppState
 
 
 _AVATAR_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# Serializes base-cache generation across startup and concurrent selects.
+_prepare_lock = threading.Lock()
 _REQUIRED_FILES = (
     "latents.pt",
     "coords.pkl",
@@ -246,6 +255,76 @@ def is_duplex_avatar(state: AppState, avatar_id: str) -> bool:
     )
 
 
+def _base_cache_error(state: AppState, variant: Any) -> str | None:
+    """Return why a configured base cache cannot be used, or None if valid."""
+    version = state.args.version
+    cache = inspect_avatar_cache(variant.cache_id, version)
+    if not cache.valid:
+        return cache.error or "invalid cache"
+    cache_dir = cache_dir_for(variant.cache_id, version)
+    try:
+        with open(cache_dir / "avator_info.json", "r", encoding="utf-8") as stream:
+            info = json.load(stream)
+    except Exception as exc:
+        return f"unreadable avator_info.json: {exc}"
+    cached_loop_mode = str(info.get("loop_mode", "pingpong")).lower()
+    if cached_loop_mode != variant.loop_mode:
+        return (
+            f"loop_mode mismatch: configured={variant.loop_mode}, "
+            f"cached={cached_loop_mode}"
+        )
+    cached_source = str(info.get("video_path") or "")
+    if (
+        variant.video_path
+        and cached_source
+        and resolve_source_path(cached_source).resolve()
+        != resolve_source_path(variant.video_path).resolve()
+    ):
+        return (
+            f"video_path mismatch: configured={variant.video_path}, "
+            f"cached={cached_source}"
+        )
+    if getattr(state.model.runtime, "face_restorer", None) is not None:
+        from .inference.restoration import load_alignment_cache
+
+        try:
+            load_alignment_cache(cache_dir, cache.frame_count)
+        except Exception as exc:
+            return f"GPEN alignment unusable: {exc}"
+    return None
+
+
+def ensure_avatar_base_caches(state: AppState) -> None:
+    """Make every configured listen/speak base cache valid before loading.
+
+    Variants with preparation=auto are (re)generated from their video_path;
+    variants with preparation=reuse must already have a valid cache.
+    """
+    configs = state.model.avatar_base_configs
+    with _prepare_lock:
+        for base in ("listen", "speak"):
+            for variant in configs.get(base, ()):
+                error = _base_cache_error(state, variant)
+                if error is None:
+                    continue
+                if variant.preparation != "auto":
+                    raise AvatarInvalidError(
+                        f"{variant.variant_id} ({variant.cache_id}): {error}; "
+                        "set preparation: auto to generate it"
+                    )
+                log(
+                    f"avatar base cache unusable: variant={variant.variant_id} "
+                    f"cache={variant.cache_id} reason={error}"
+                )
+                prepare_avatar_base(state.args, state.model.runtime, variant)
+                error = _base_cache_error(state, variant)
+                if error is not None:
+                    raise AvatarInvalidError(
+                        f"{variant.variant_id} ({variant.cache_id}) is still "
+                        f"invalid after preparation: {error}"
+                    )
+
+
 def inspect_duplex_avatar(state: AppState) -> AvatarCacheInfo:
     avatar_id = state.model.default_avatar_id
     configs = state.model.avatar_base_configs
@@ -395,6 +474,17 @@ def activate_avatar(
     )
     target_id = validate_avatar_id(target_id)
     duplex = is_duplex_avatar(state, target_id)
+    if duplex and not (
+        state.model.avatar_ready
+        and state.model.avatar_id == target_id
+        and state.model.avatar is not None
+    ):
+        # Refuse before spending minutes on cache generation for a switch
+        # that the busy check below would reject anyway.
+        reason = _busy_reason(state)
+        if reason:
+            raise AvatarBusyError(reason)
+        ensure_avatar_base_caches(state)
     info = (
         inspect_duplex_avatar(state)
         if duplex else inspect_avatar_cache(target_id, args.version)

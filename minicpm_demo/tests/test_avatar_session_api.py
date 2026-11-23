@@ -83,7 +83,27 @@ def test_create_session_resolves_preset_voice_and_prompt() -> None:
         "Streaming Audio Conversation."
     )
     assert session.init_payload["ref_audio_base64"] == "AAAA"
-    assert session.init_payload["config"]["length_penalty"] == 1.1
+    assert session.init_payload["config"]["length_penalty"] == 1.05
+
+
+def test_session_length_penalty_comes_from_server_config(monkeypatch) -> None:
+    import config
+
+    cfg = config.ServiceConfig(duplex={"avatar_length_penalty": 0.95})
+    monkeypatch.setattr(config, "_config", cfg)
+    service = _service()
+
+    result = asyncio.run(service.create_session({}))
+
+    session = service._sessions[result["session_id"]]
+    assert session.init_payload["config"]["length_penalty"] == 0.95
+
+
+def test_avatar_length_penalty_config_is_bounded() -> None:
+    import config
+
+    with pytest.raises(ValueError):
+        config.ServiceConfig(duplex={"avatar_length_penalty": 3.0})
 
 
 def test_session_capacity_rejects_second_active_session() -> None:

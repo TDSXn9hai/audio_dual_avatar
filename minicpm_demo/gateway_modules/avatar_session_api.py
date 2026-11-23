@@ -40,6 +40,13 @@ _VALID_INPUT_FORMATS = {"pcm_f32le_16000"}
 _MAX_AUDIO_BASE64_BYTES = 2 * 1024 * 1024
 
 
+def _default_length_penalty() -> float:
+    """Avatar session length_penalty from config.json (duplex.avatar_length_penalty)."""
+    from config import get_config
+
+    return get_config().avatar_length_penalty
+
+
 class AvatarSessionError(RuntimeError):
     def __init__(
         self,
@@ -236,7 +243,9 @@ class AvatarSessionService:
             if not isinstance(config, dict):
                 raise AvatarSessionError("config must be an object")
             try:
-                length_penalty = float(config.get("length_penalty", 1.1))
+                length_penalty = float(
+                    config.get("length_penalty", _default_length_penalty())
+                )
             except (TypeError, ValueError) as exc:
                 raise AvatarSessionError("length_penalty must be numeric") from exc
             if not 0.5 <= length_penalty <= 2.0:
