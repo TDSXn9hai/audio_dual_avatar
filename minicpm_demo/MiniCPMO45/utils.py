@@ -2116,6 +2116,7 @@ class StreamDecoder:
         text_repetition_penalty=1.05,
         text_repetition_window_size=512,
         length_penalty=1.1,
+        listen_logit_bias=0.0,
     ):
         """
         Args:
@@ -2128,6 +2129,7 @@ class StreamDecoder:
             listen_prob_scale: multiply listen_id probability by a weight (<1 means decrease, >1 means increase)
             text_repetition_penalty: repetition penalty coefficient, >1.0 means decrease repetition, <1.0 means increase repetition
             text_repetition_window_size: repetition penalty window size
+            listen_logit_bias: additive bias on the listen_id logit (<0 means decrease, >0 means increase)
 
         Sampling strategy:
             1. first sample all tokens with original logits (apply temperature)
@@ -2137,6 +2139,8 @@ class StreamDecoder:
         """
 
         logits = logits.clone()
+        # turn_eos 在施加 length_penalty 之前的采样概率（chunk_eos 提前返回时为 None）
+        self.last_raw_turn_eos_prob = None
 
         # 0. independently check chunk_eos before sampling
         eos_id = self.chunk_eos_id
@@ -2180,6 +2184,8 @@ class StreamDecoder:
 
         # 2. apply length penalty to turn_eos token
         # higher length_penalty → suppress turn_eos → model 更不容易结束当前 turn，倾向更长输出
+        _t = temperature if mode == "sampling" and temperature > 0 else 1.0
+        self.last_raw_turn_eos_prob = F.softmax(logits[0] / _t, dim=-1)[self.turn_eos_id].item()
         if length_penalty != 1.0:
             turn_eos_id = self.turn_eos_id
             if logits[0, turn_eos_id] > 0:
@@ -2189,6 +2195,9 @@ class StreamDecoder:
 
         if listen_prob_scale != 1.0:  # modify listen token logit separately
             logits[0, self.listen_id] *= listen_prob_scale
+
+        if listen_logit_bias != 0.0:
+            logits[0, self.listen_id] += listen_logit_bias
 
         listen_rank = (logits[0] > logits[0, self.listen_id]).sum().item()
 

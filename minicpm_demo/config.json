@@ -26,6 +26,8 @@
     },
     "duplex": {
         "pause_timeout": 60.0,
-        "avatar_length_penalty": 1.05
+        "avatar_length_penalty": 1.05,
+        "avatar_sentence_aware_length_penalty": true,
+        "avatar_committed_turn_eos_threshold": 0.3
     }
 }

@@ -209,6 +209,9 @@ class LiveStreamSession:
             # A new viewer has no decoder state to reset, so any flush that
             # happened while nobody was watching is already satisfied.
             state.pipeline.flush_sent_seq = state.pipeline.flush_seq
+            # Its timeline restarts at frame 0; a playback reset computed on
+            # the previous viewer's timeline must not move it.
+            state.interrupt.reset_frame = -1
         self.max_prefetch_frames = max(
             state.model.prebuffer,
             int(state.model.fps * args.max_prefetch_seconds),

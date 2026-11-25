@@ -254,6 +254,34 @@ class DuplexConfig(BaseModel):
         le=5.0,
         description="长度惩罚系数。>1.0 抑制 turn_eos token 使模型当前 turn 输出更长，=1.0 不惩罚，<1.0 鼓励更早结束"
     )
+    sentence_aware_length_penalty: bool = Field(
+        False,
+        description="仅在句末标点后施加 length_penalty；句中不压制 turn_eos，保留模型对插话的停止反应"
+    )
+    interrupt_listen_penalty: float = Field(
+        0.0,
+        ge=0.0,
+        description="句中 turn_eos（被插话打断）后，从 listen logit 减去的值，促使模型回答插话；0 关闭"
+    )
+    interrupt_bias_chunks: int = Field(
+        0,
+        ge=0,
+        description="插话后 listen 抑制持续的 chunk 数；模型开口即提前结束"
+    )
+    interrupt_bias_delay_chunks: int = Field(
+        1,
+        ge=0,
+        description="插话后开始施加 listen 抑制前跳过的 chunk 数（让用户先说完）"
+    )
+    committed_turn_eos_threshold: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "配合 sentence_aware_length_penalty：句末 turn_eos 原始概率不低于该值而模型继续说话时，"
+            "视为已在本 turn 内接管插话，下一句句中也施加 length_penalty（每个句末重新判断）；0 关闭"
+        )
+    )
     
     # Listen 相关
     listen_prob_scale: float = Field(

@@ -47,6 +47,13 @@ def _default_length_penalty() -> float:
     return get_config().avatar_length_penalty
 
 
+def _default_session_config() -> dict:
+    """Avatar session decoding config from config.json (duplex.avatar_*)."""
+    from config import get_config
+
+    return get_config().avatar_session_config
+
+
 class AvatarSessionError(RuntimeError):
     def __init__(
         self,
@@ -263,7 +270,10 @@ class AvatarSessionService:
                 preset_name=item["name"],
                 init_payload={
                     "system_prompt": prompt,
-                    "config": {"length_penalty": length_penalty},
+                    "config": {
+                        **_default_session_config(),
+                        "length_penalty": length_penalty,
+                    },
                     "use_tts": True,
                     "ref_audio_base64": voice["base64"],
                     "tts_ref_audio_base64": voice["base64"],

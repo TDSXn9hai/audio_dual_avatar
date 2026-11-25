@@ -2195,7 +2195,7 @@ async def avatar_preset_activate(preset_id: str, request: Request):
         "height": result.get("height", item.get("cache", {}).get("height")),
         "avatar_revision": result.get("avatar_revision"),
         # Session decoding config for /avatar; kept server-side, not shown in the UI.
-        "session_config": {"length_penalty": get_config().avatar_length_penalty},
+        "session_config": get_config().avatar_session_config,
     }
 
 

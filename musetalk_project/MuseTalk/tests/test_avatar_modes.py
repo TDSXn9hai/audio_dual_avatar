@@ -284,6 +284,53 @@ def test_listen_transition_finishes_audio_without_barge_in_flush():
     assert controller.pending_base is None
 
 
+def _bridge_with_queued_reply():
+    state = AppState()
+    state.pipeline.ack_frame = 40
+    for segment_id in (5, 6, 7):
+        state.pipeline.segments[segment_id] = SimpleNamespace(id=segment_id)
+    # 5 is generating; 6 and 7 are queued behind it.
+    state.pipeline.normal_queue.put(state.pipeline.segments[6])
+    state.pipeline.normal_queue.put(state.pipeline.segments[7])
+    session = object.__new__(MiniCPMBridgeSession)
+    session.state = state
+    session.segments = SegmentManager(state)
+    session.buffer = bytearray(b"\x00" * 64)
+    session.context_left_bytes = 0
+    session.response_id = "resp-old"
+    session.last_response_id = "resp-old"
+    session.turn_open = True
+    session.resampler = object()
+    session.flushes = 0
+    session.session_flushed = False
+    return session, state
+
+
+def test_session_reset_drops_unplayed_reply_instead_of_finishing_it():
+    session, state = _bridge_with_queued_reply()
+    session._end_turn = AsyncMock()
+
+    asyncio.run(session._handle_message({"type": "bridge.reset"}))
+
+    session._end_turn.assert_not_called()
+    assert state.pipeline.normal_queue.qsize() == 0
+    assert {5, 6, 7} <= state.pipeline.canceled_ids
+    assert state.interrupt.reset_frame == 41
+    assert not session.turn_open
+    assert session.flushed_response_id == "resp-old"
+
+
+def test_session_end_flushes_once_across_reset_and_disconnect():
+    session, state = _bridge_with_queued_reply()
+
+    asyncio.run(session._handle_message({"type": "bridge.reset"}))
+    seq = state.pipeline.flush_seq
+    session._end_session("disconnect")
+
+    assert session.flushes == 1
+    assert state.pipeline.flush_seq == seq
+
+
 def test_speak_waits_for_a_speech_frame_at_a_forward_loop_boundary():
     controller = make_controller()
     controller.observe_model_mode("speak")

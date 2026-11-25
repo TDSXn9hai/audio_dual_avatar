@@ -186,6 +186,22 @@ class DuplexSectionConfig(BaseModel):
             "不在页面上暴露。"
         ),
     )
+    avatar_sentence_aware_length_penalty: bool = Field(
+        default=False,
+        description=(
+            "数字人会话仅在句末标点后施加 length_penalty，句中不压制 turn_eos，"
+            "保留模型对插话的停止反应。只在 gateway 启动时读取。"
+        ),
+    )
+    avatar_committed_turn_eos_threshold: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "配合 avatar_sentence_aware_length_penalty：句末 turn_eos 原始概率不低于该值而模型继续说话时，"
+            "下一句句中也施加 length_penalty，避免截断插话后的新回答；0 关闭。只在 gateway 启动时读取。"
+        ),
+    )
 
 
 # ============ 顶层配置 ============
@@ -294,6 +310,15 @@ class ServiceConfig(BaseModel):
         return self.duplex.avatar_length_penalty
 
     @property
+    def avatar_session_config(self) -> dict:
+        """数字人会话下发给 worker 的解码配置"""
+        return {
+            "length_penalty": self.duplex.avatar_length_penalty,
+            "sentence_aware_length_penalty": self.duplex.avatar_sentence_aware_length_penalty,
+            "committed_turn_eos_threshold": self.duplex.avatar_committed_turn_eos_threshold,
+        }
+
+    @property
     def playback_delay_ms(self) -> int:
         return self.audio.playback_delay_ms
 
@@ -354,7 +379,9 @@ def load_config(path: str = _CONFIG_PATH) -> ServiceConfig:
         f"gateway_port={config.gateway_port}, "
         f"playback_delay_ms={config.playback_delay_ms}, "
         f"chat_vocoder={config.chat_vocoder}, "
-        f"avatar_length_penalty={config.avatar_length_penalty}"
+        f"avatar_length_penalty={config.avatar_length_penalty}, "
+        f"avatar_sentence_aware_length_penalty={config.duplex.avatar_sentence_aware_length_penalty}, "
+        f"avatar_committed_turn_eos_threshold={config.duplex.avatar_committed_turn_eos_threshold}"
     )
     return config
 

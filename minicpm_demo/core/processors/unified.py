@@ -952,6 +952,11 @@ class DuplexView:
             text_repetition_window_size=self.config.text_repetition_window_size,
             length_penalty=self.config.length_penalty,
             force_listen_override=force_listen,
+            sentence_aware_length_penalty=self.config.sentence_aware_length_penalty,
+            interrupt_listen_penalty=self.config.interrupt_listen_penalty,
+            interrupt_bias_chunks=self.config.interrupt_bias_chunks,
+            interrupt_bias_delay_chunks=self.config.interrupt_bias_delay_chunks,
+            committed_turn_eos_threshold=self.config.committed_turn_eos_threshold,
         )
         
         # 转换音频

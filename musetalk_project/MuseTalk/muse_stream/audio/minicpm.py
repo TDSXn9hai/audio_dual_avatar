@@ -9,7 +9,10 @@ MiniCPM-o drives the turn state:
 - a ``listen`` delta ends the turn: the tail is flushed and marked final,
   and a following reply queues behind it instead of cutting it off;
 - ``bridge.flush`` (client force_listen), or a reply switch without a
-  ``listen`` in between, cancels everything without resume.
+  ``listen`` in between, cancels everything without resume;
+- the session ending (``bridge.reset``, ``session.closed`` or the bridge
+  disconnecting) also cancels everything, so an unfinished reply never
+  replays into the next session.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
         self.resampler = None
         self.turns = 0
         self.flushes = 0
+        self.session_flushed = False
 
     async def run(self) -> None:
         state = self.state
@@ -85,7 +89,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
                 except WebSocketDisconnect:
                     pass
                 finally:
-                    await self._end_turn("disconnect")
+                    self._end_session("disconnect")
                     state.stream_input.connected = False
                     log(
                         "minicpm bridge disconnected: "
@@ -128,7 +132,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
         elif kind == "bridge.flush":
             self._barge_in(str(message.get("reason") or "force_listen"))
         elif kind in ("session.closed", "bridge.reset"):
-            await self._end_turn(kind)
+            self._end_session(kind)
         elif kind == "ping":
             await self.websocket.send_json({"type": "pong"})
 
@@ -197,6 +201,18 @@ class MiniCPMBridgeSession(StreamAudioSession):
         self.turn_open = False
         self.response_id = None
         self.resampler = None
+
+    def _end_session(self, reason: str) -> None:
+        """Drop all unplayed audio once; nobody will watch the rest of it."""
+        if self.session_flushed:
+            return
+        self.session_flushed = True
+        log(
+            f"minicpm session end ({reason}): response_id="
+            f"{self.response_id or self.last_response_id} "
+            f"turn_open={self.turn_open}"
+        )
+        self._barge_in(f"session_end:{reason}")
 
     def _barge_in(self, reason: str) -> None:
         self.flushed_response_id = self.response_id or self.last_response_id

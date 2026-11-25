@@ -3998,6 +3998,11 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         text_repetition_window_size: Optional[int] = None,
         length_penalty: float = 1.1,
         force_listen_override: bool = False,
+        sentence_aware_length_penalty: bool = False,
+        interrupt_listen_penalty: float = 0.0,
+        interrupt_bias_chunks: int = 0,
+        interrupt_bias_delay_chunks: int = 1,
+        committed_turn_eos_threshold: float = 0.0,
     ):
         """生成响应（透传到 self.duplex.streaming_generate）
         
@@ -4029,6 +4034,11 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             text_repetition_window_size=text_repetition_window_size,
             length_penalty=length_penalty,
             force_listen_override=force_listen_override,
+            sentence_aware_length_penalty=sentence_aware_length_penalty,
+            interrupt_listen_penalty=interrupt_listen_penalty,
+            interrupt_bias_chunks=interrupt_bias_chunks,
+            interrupt_bias_delay_chunks=interrupt_bias_delay_chunks,
+            committed_turn_eos_threshold=committed_turn_eos_threshold,
         )
     
     def duplex_finalize(self):
@@ -4444,6 +4454,12 @@ class DuplexCapability:
 
         # Force listen state
         self._streaming_generate_count = 0
+
+        # 句中 turn_eos（视为被插话打断）后的 listen 抑制窗口
+        self._interrupt_bias_remaining = 0
+        self._interrupt_bias_delay = 0
+        # 句末出现结束意图但模型继续说话后，下一句句中也施加 length_penalty
+        self._turn_committed = False
 
         # Deferred finalize state（必须清理，否则上一个 session 异常退出后
         # _pending_finalize 残留，导致新 session 的第一个 prefill 报错）
@@ -4999,6 +5015,23 @@ class DuplexCapability:
         """是否有待执行的 finalize（用于调用方检查）"""
         return getattr(self, "_pending_finalize", None) is not None
 
+    _SENTENCE_END_CHARS = set("。！？!?.…；;~～")
+    _CLOSING_CHARS = "”’\"'）)】」』》 \n"
+
+    def _last_text_is_sentence_end(self) -> bool:
+        """上一个已输出文本 token 是否以句末标点结尾（turn 开头视为句末）"""
+        if self.current_turn_ended or not self.res_ids:
+            return True
+        text = self.tokenizer.decode(self.res_ids[-4:], skip_special_tokens=True)
+        text = text.rstrip(self._CLOSING_CHARS)
+        return not text or text[-1] in self._SENTENCE_END_CHARS
+
+    @staticmethod
+    def _fmt_eot_trace(raw_eot, step_length_penalty) -> str:
+        if raw_eot is None:
+            return ""
+        return f" p_eot={raw_eot:.4f} lp={step_length_penalty}"
+
     @torch.no_grad()
     def streaming_generate(
         self,
@@ -5014,8 +5047,21 @@ class DuplexCapability:
         text_repetition_window_size=512,
         length_penalty=1.1,
         force_listen_override: bool = False,
+        sentence_aware_length_penalty: bool = False,
+        interrupt_listen_penalty: float = 0.0,
+        interrupt_bias_chunks: int = 0,
+        interrupt_bias_delay_chunks: int = 1,
+        committed_turn_eos_threshold: float = 0.0,
     ):
         """生成响应。返回后必须调用 finalize_unit()（除非 needs_finalize 为 False）。
+
+        sentence_aware_length_penalty: 仅在上一个文本 token 为句末标点时施加 length_penalty，
+            句中不压制 turn_eos（句中 turn_eos 通常是模型对插话的反应）
+        committed_turn_eos_threshold: >0 时，若句末处 turn_eos 原始概率（施加 length_penalty 前）
+            不低于该值而模型继续说话，则下一句句中也施加 length_penalty（每个句末重新判断）
+        interrupt_listen_penalty / interrupt_bias_chunks / interrupt_bias_delay_chunks:
+            句中 turn_eos 后，跳过 delay 个 chunk，在之后最多 chunks 个 listen chunk 的首 token 上
+            从 listen logit 减去 penalty，促使模型回答插话内容；模型一开口即结束窗口
 
         调用方可以选择调度策略：
         - 模式 A（异步）: generate → 返回结果 → finalize（与网络传输重叠）
@@ -5052,6 +5098,7 @@ class DuplexCapability:
                 self.decoder.embed_token(self.turn_eos_token_id), return_logits=True
             )
             self.current_turn_ended = True
+            self._turn_committed = False
             self._reset_token2wav_for_new_turn()
             logger.info("[Duplex] force_listen: fed <|turn_eos|> to close speaking turn, reset TTS caches")
 
@@ -5072,6 +5119,18 @@ class DuplexCapability:
         _pending_terminator_id = None  # 延迟 feed 的终止符，和 </unit> 合并
         _chunk_has_tts_pad = False
 
+        # 插话后的 listen 抑制：只作用于已结束 turn 的 unit 首 token
+        _listen_bias = 0.0
+        _mid_sentence = False
+        _raw_eot = None
+        _step_length_penalty = length_penalty
+        if self._interrupt_bias_remaining > 0 and self.current_turn_ended and not force_listen:
+            if self._interrupt_bias_delay > 0:
+                self._interrupt_bias_delay -= 1
+            else:
+                _listen_bias = -interrupt_listen_penalty
+                self._interrupt_bias_remaining -= 1
+
         for j in range(max_new_speak_tokens_per_chunk):
             if j == max_new_speak_tokens_per_chunk - 1:
                 if self.ls_mode == "explicit":
@@ -5087,6 +5146,10 @@ class DuplexCapability:
                 last_id = torch.tensor([self.listen_token_id], dtype=torch.long, device=self.device)
                 _decode_ms = 0.0
             else:
+                _mid_sentence = not self._last_text_is_sentence_end()
+                _step_length_penalty = length_penalty
+                if sentence_aware_length_penalty and _mid_sentence and not self._turn_committed:
+                    _step_length_penalty = 1.0
                 last_id = self.decoder.decode(
                     logits=logits,
                     mode=decode_mode,
@@ -5097,9 +5160,28 @@ class DuplexCapability:
                     listen_prob_scale=listen_prob_scale,
                     text_repetition_penalty=text_repetition_penalty,
                     text_repetition_window_size=text_repetition_window_size,
-                    length_penalty=length_penalty,
+                    length_penalty=_step_length_penalty,
+                    listen_logit_bias=_listen_bias if j == 0 else 0.0,
                 )
                 _decode_ms = (time.time() - t_step) * 1000
+                _raw_eot = getattr(self.decoder, "last_raw_turn_eos_prob", None)
+
+                # 句末出现了较强的结束意图但模型继续说话：视为已在本 turn 内接管插话，
+                # 下一句句中也照常施加 length_penalty，避免截断新回答；每个句末重新判断
+                if (
+                    committed_turn_eos_threshold > 0
+                    and j > 0
+                    and not self.current_turn_ended
+                    and not _mid_sentence
+                    and _raw_eot is not None
+                    and last_id.item() != self.turn_eos_token_id
+                ):
+                    _committed = _raw_eot >= committed_turn_eos_threshold
+                    if _committed and not self._turn_committed:
+                        logger.info(
+                            f"[Duplex] turn committed at t={current_time}: sentence-end p_eot={_raw_eot:.3f}"
+                        )
+                    self._turn_committed = _committed
 
                 # if current turn not ended, not allowed to listen (only check when not force_listen)
                 if last_id.item() == self.listen_token_id and (not self.current_turn_ended):
@@ -5159,9 +5241,20 @@ class DuplexCapability:
 
                 if end_of_turn:
                     self.current_turn_ended = True
+                    self._turn_committed = False
+                    if interrupt_bias_chunks > 0 and interrupt_listen_penalty > 0 and _mid_sentence:
+                        self._interrupt_bias_remaining = interrupt_bias_chunks
+                        self._interrupt_bias_delay = interrupt_bias_delay_chunks
+                        logger.info(
+                            f"[Duplex] mid-sentence turn_eos at t={current_time}: listen penalty "
+                            f"{interrupt_listen_penalty} for {interrupt_bias_chunks} chunks after {interrupt_bias_delay_chunks}"
+                        )
 
                 _kind = "SPECIAL" if _is_special else "TEXT"
-                _token_trace.append(f"  j={j} {_kind} id={last_id.item()} '{_tok_str}' decode={_decode_ms:.1f}ms feed={_feed_ms:.1f}ms")
+                _token_trace.append(
+                    f"  j={j} {_kind} id={last_id.item()} '{_tok_str}' decode={_decode_ms:.1f}ms feed={_feed_ms:.1f}ms"
+                    f"{self._fmt_eot_trace(_raw_eot, _step_length_penalty)}"
+                )
 
                 if j != 0:
                     total_hidden_in_unit.append([last_id.item(), hidden, end_of_turn])
@@ -5173,13 +5266,17 @@ class DuplexCapability:
             assert self.tts_pad_id not in self.decoder.forbidden_token_ids
         self._last_chunk_had_tts_pad = _chunk_has_tts_pad
 
+        # 插话后模型已开口回答：结束 listen 抑制窗口
+        if not is_listen and not end_of_turn and total_ids_in_unit:
+            self._interrupt_bias_remaining = 0
+
         # [DEBUG] 打印完整 token trace
         _trace_str = "\n".join(_token_trace)
         logger.info(
             f"[TokenTrace] t={current_time} is_listen={is_listen} "
             f"text_tokens={len(total_ids_in_unit)} total_steps={len(_token_trace)}"
             f" tts_pad={'suppressed' if _tts_pad_suppressed else 'allowed'}"
-            f" had_tts_pad={_chunk_has_tts_pad}\n{_trace_str}"
+            f" had_tts_pad={_chunk_has_tts_pad} listen_bias={_listen_bias}\n{_trace_str}"
         )
 
         # 计算生成的文本（用于滑窗 context 保留，过滤掉特殊 token）
