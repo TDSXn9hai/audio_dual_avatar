@@ -28,6 +28,9 @@
         "pause_timeout": 60.0,
         "avatar_length_penalty": 1.05,
         "avatar_sentence_aware_length_penalty": true,
-        "avatar_committed_turn_eos_threshold": 0.3
+        "avatar_committed_turn_eos_threshold": 0.3,
+        "avatar_interrupt_listen_penalty": 3.0,
+        "avatar_interrupt_bias_chunks": 8,
+        "avatar_interrupt_speak_prob_gate": 0.02
     }
 }

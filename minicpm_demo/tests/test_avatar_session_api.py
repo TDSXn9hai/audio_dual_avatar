@@ -105,6 +105,7 @@ def test_session_sentence_aware_length_penalty_comes_from_server_config(monkeypa
     cfg = config.ServiceConfig(duplex={
         "avatar_sentence_aware_length_penalty": True,
         "avatar_committed_turn_eos_threshold": 0.3,
+        "avatar_interrupt_listen_penalty": 3.0,
     })
     monkeypatch.setattr(config, "_config", cfg)
     service = _service()
@@ -116,6 +117,10 @@ def test_session_sentence_aware_length_penalty_comes_from_server_config(monkeypa
         "length_penalty": 1.2,
         "sentence_aware_length_penalty": True,
         "committed_turn_eos_threshold": 0.3,
+        "interrupt_listen_penalty": 3.0,
+        "interrupt_bias_chunks": 8,
+        "interrupt_bias_delay_chunks": 0,
+        "interrupt_speak_prob_gate": 0.02,
     }
 
 

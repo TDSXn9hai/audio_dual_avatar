@@ -282,6 +282,15 @@ class DuplexConfig(BaseModel):
             "视为已在本 turn 内接管插话，下一句句中也施加 length_penalty（每个句末重新判断）；0 关闭"
         )
     )
+    interrupt_speak_prob_gate: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "配合 interrupt_listen_penalty：>0 时 listen 抑制窗口在任意 turn_eos 后开启，"
+            "且只在 unit 首 token 处 <|speak|> 原始概率不低于该值时施加；0 时窗口仅在句中 turn_eos 后开启、无门限"
+        )
+    )
     
     # Listen 相关
     listen_prob_scale: float = Field(

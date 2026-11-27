@@ -202,6 +202,25 @@ class DuplexSectionConfig(BaseModel):
             "下一句句中也施加 length_penalty，避免截断插话后的新回答；0 关闭。只在 gateway 启动时读取。"
         ),
     )
+    avatar_interrupt_listen_penalty: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "数字人会话：turn_eos 后的窗口内，<|speak|> 原始概率达到 avatar_interrupt_speak_prob_gate 时"
+            "从 listen logit 减去的值，减少插话后停下就沉默；0 关闭。只在 gateway 启动时读取。"
+        ),
+    )
+    avatar_interrupt_bias_chunks: int = Field(
+        default=8,
+        ge=0,
+        description="上述窗口的 chunk 数（模型一开口即结束）",
+    )
+    avatar_interrupt_speak_prob_gate: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+        description="上述窗口内施加 listen 抑制所需的 <|speak|> 原始概率下限",
+    )
 
 
 # ============ 顶层配置 ============
@@ -316,6 +335,10 @@ class ServiceConfig(BaseModel):
             "length_penalty": self.duplex.avatar_length_penalty,
             "sentence_aware_length_penalty": self.duplex.avatar_sentence_aware_length_penalty,
             "committed_turn_eos_threshold": self.duplex.avatar_committed_turn_eos_threshold,
+            "interrupt_listen_penalty": self.duplex.avatar_interrupt_listen_penalty,
+            "interrupt_bias_chunks": self.duplex.avatar_interrupt_bias_chunks,
+            "interrupt_bias_delay_chunks": 0,
+            "interrupt_speak_prob_gate": self.duplex.avatar_interrupt_speak_prob_gate,
         }
 
     @property
@@ -381,7 +404,9 @@ def load_config(path: str = _CONFIG_PATH) -> ServiceConfig:
         f"chat_vocoder={config.chat_vocoder}, "
         f"avatar_length_penalty={config.avatar_length_penalty}, "
         f"avatar_sentence_aware_length_penalty={config.duplex.avatar_sentence_aware_length_penalty}, "
-        f"avatar_committed_turn_eos_threshold={config.duplex.avatar_committed_turn_eos_threshold}"
+        f"avatar_committed_turn_eos_threshold={config.duplex.avatar_committed_turn_eos_threshold}, "
+        f"avatar_interrupt_listen_penalty={config.duplex.avatar_interrupt_listen_penalty}, "
+        f"avatar_interrupt_speak_prob_gate={config.duplex.avatar_interrupt_speak_prob_gate}"
     )
     return config
 

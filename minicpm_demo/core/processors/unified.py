@@ -957,6 +957,7 @@ class DuplexView:
             interrupt_bias_chunks=self.config.interrupt_bias_chunks,
             interrupt_bias_delay_chunks=self.config.interrupt_bias_delay_chunks,
             committed_turn_eos_threshold=self.config.committed_turn_eos_threshold,
+            interrupt_speak_prob_gate=self.config.interrupt_speak_prob_gate,
         )
         
         # 转换音频

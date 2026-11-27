@@ -1,0 +1,20 @@
+{
+  "_comment": "Duplex config overrides merged into session.init payload.config by run_ab.sh (length_penalty comes from --lp).",
+  "base": {},
+  "A": {"sentence_aware_length_penalty": true},
+  "AC": {"sentence_aware_length_penalty": true, "committed_turn_eos_threshold": 0.3},
+  "ACB": {
+    "sentence_aware_length_penalty": true,
+    "committed_turn_eos_threshold": 0.3,
+    "interrupt_listen_penalty": 3.0,
+    "interrupt_bias_chunks": 8,
+    "interrupt_bias_delay_chunks": 0,
+    "interrupt_speak_prob_gate": 0.02
+  },
+  "AB_ungated": {
+    "sentence_aware_length_penalty": true,
+    "interrupt_listen_penalty": 3.0,
+    "interrupt_bias_chunks": 8,
+    "interrupt_bias_delay_chunks": 1
+  }
+}
